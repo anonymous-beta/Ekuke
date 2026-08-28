@@ -1,0 +1,39 @@
+[package]
+name = "ekuke"
+version = "0.1.0"
+description = "EKUKE — Local-first OSINT investigation platform"
+authors = ["Anonymous-beta <chinedu>"]
+license = "MIT"
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+kuzu = "0.8"
+tantivy = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+zip = { version = "2", features = ["deflate"] }
+walkdir = "2"
+regex = "1"
+anyhow = "1"
+thiserror = "1"
+dirs = "5"
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
+bincode = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
