@@ -1,0 +1,20 @@
+{
+    "id": "dns-lookup",
+    "name": "DNS Lookup",
+    "version": "1.0.0",
+    "author": "EKUKE Team",
+    "description": "Resolve DNS A/AAAA/MX/NS/TXT records for a domain",
+    "input_types": ["Domain"],
+    "output_types": ["IPv4", "Domain", "Other"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": [
+        {
+            "name": "record_type",
+            "field_type": "string",
+            "default": "A",
+            "required": false,
+            "description": "DNS record type: A, AAAA, MX, NS, TXT"
+        }
+    ]
+}
