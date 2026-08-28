@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/capabilities-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for EKUKE",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
+}
