@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EKUKE</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <div id="sidebar">
+            <div class="logo">EKUKE 🐕</div>
+            <div class="section">
+                <button id="btn-new-case" class="btn primary">New Case</button>
+                <button id="btn-open-case" class="btn">Open Case</button>
+                <button id="btn-save-case" class="btn">Save Case</button>
+                <button id="btn-export-case" class="btn">Export .ekuke</button>
+                <button id="btn-import-case" class="btn">Import .ekuke</button>
+            </div>
+            <div class="section">
+                <h3>Entities</h3>
+                <div id="entity-types"></div>
+            </div>
+            <div class="section">
+                <h3>Plugins</h3>
+                <div id="plugin-list"></div>
+            </div>
+        </div>
+        
+        <div id="main">
+            <div id="toolbar">
+                <input type="text" id="search-bar" placeholder="Search entities...">
+                <button id="btn-add-entity" class="btn">+ Entity</button>
+                <button id="btn-extract" class="btn">Extract Text</button>
+                <span id="case-name"></span>
+            </div>
+            <div id="graph-container"></div>
+        </div>
+        
+        <div id="detail-panel" class="hidden">
+            <h3>Details</h3>
+            <div id="detail-content"></div>
+            <button id="btn-close-detail" class="btn">Close</button>
+        </div>
+    </div>
+
+    <div id="modal-overlay" class="hidden">
+        <div id="modal" class="modal">
+            <h3 id="modal-title">Modal</h3>
+            <div id="modal-body"></div>
+            <div class="modal-actions">
+                <button id="modal-cancel" class="btn">Cancel</button>
+                <button id="modal-confirm" class="btn primary">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
