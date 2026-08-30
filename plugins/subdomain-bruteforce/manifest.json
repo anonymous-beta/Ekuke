@@ -1,0 +1,15 @@
+{
+    "id": "subdomain-bruteforce",
+    "name": "Subdomain Brute Force",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "DNS brute force using embedded wordlist or custom list. Pure Python, zero external calls.",
+    "input_types": ["Domain"],
+    "output_types": ["Domain"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": [
+        {"name": "wordlist", "field_type": "string", "default": "", "required": false, "description": "Path to custom wordlist file"},
+        {"name": "threads", "field_type": "string", "default": "50", "required": false, "description": "Concurrent resolver threads"}
+    ]
+}
