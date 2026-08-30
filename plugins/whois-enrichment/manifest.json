@@ -1,0 +1,12 @@
+{
+    "id": "whois-enrichment",
+    "name": "WHOIS Enrichment",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "Extract registrar, dates, name servers, and registrant data via WHOIS",
+    "input_types": ["Domain", "URL"],
+    "output_types": ["Domain", "Other"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": []
+}
