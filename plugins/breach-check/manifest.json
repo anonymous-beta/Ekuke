@@ -1,0 +1,15 @@
+{
+    "id": "breach-check",
+    "name": "Breach Check",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "Check email against HaveIBeenPwned v3 API. BYO API key. Direct connection.",
+    "input_types": ["Email"],
+    "output_types": ["Breach"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": [
+        {"name": "hibp_api_key", "field_type": "string", "default": "", "required": true, "description": "HaveIBeenPwned API key"},
+        {"name": "proxy", "field_type": "string", "default": "", "required": false, "description": "HTTP proxy URL"}
+    ]
+}
