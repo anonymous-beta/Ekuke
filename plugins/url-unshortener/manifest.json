@@ -1,0 +1,14 @@
+{
+    "id": "url-unshortener",
+    "name": "URL Unshortener",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "Follow redirect chains to reveal final destination URLs. Direct HTTP requests.",
+    "input_types": ["URL"],
+    "output_types": ["URL"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": [
+        {"name": "proxy", "field_type": "string", "default": "", "required": false, "description": "HTTP proxy URL"}
+    ]
+}
