@@ -1,0 +1,15 @@
+{
+    "id": "wayback-enrichment",
+    "name": "Wayback Machine",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "Fetch historical snapshots from archive.org CDX API. Direct connection.",
+    "input_types": ["Domain", "URL"],
+    "output_types": ["URL"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": [
+        {"name": "proxy", "field_type": "string", "default": "", "required": false, "description": "HTTP proxy URL"},
+        {"name": "limit", "field_type": "string", "default": "1000", "required": false, "description": "Max snapshots to retrieve"}
+    ]
+}
