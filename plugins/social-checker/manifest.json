@@ -1,0 +1,15 @@
+{
+    "id": "social-checker",
+    "name": "Social Profile Checker",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "Check username/handle presence across major platforms via HTTP status heuristics.",
+    "input_types": ["Handle"],
+    "output_types": ["Profile"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": [
+        {"name": "proxy", "field_type": "string", "default": "", "required": false, "description": "HTTP proxy URL"},
+        {"name": "platforms", "field_type": "string", "default": "", "required": false, "description": "Comma-separated: Twitter/X,GitHub,Instagram,Reddit,TikTok,YouTube,LinkedIn,Twitch,Steam,GitLab,Medium"}
+    ]
+}
