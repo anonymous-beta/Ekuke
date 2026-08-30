@@ -1,0 +1,16 @@
+{
+    "id": "port-scanner",
+    "name": "Async Port Scanner",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "Fast async TCP port scan. Pure Python, no dependencies. Use only on authorized targets.",
+    "input_types": ["IPv4"],
+    "output_types": ["Port"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": [
+        {"name": "ports", "field_type": "string", "default": "", "required": false, "description": "Ports: 80,443 or 1-1000 or empty for top 25"},
+        {"name": "threads", "field_type": "string", "default": "200", "required": false, "description": "Concurrent connections"},
+        {"name": "timeout", "field_type": "string", "default": "2.0", "required": false, "description": "Connection timeout seconds"}
+    ]
+}
