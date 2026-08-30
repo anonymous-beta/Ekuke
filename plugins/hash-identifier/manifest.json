@@ -1,0 +1,12 @@
+{
+    "id": "hash-identifier",
+    "name": "Hash Identifier",
+    "version": "1.0.0",
+    "author": "EKUKE",
+    "description": "Identify hash type by pattern matching. Pure Python, fully offline.",
+    "input_types": ["Other"],
+    "output_types": ["Hash_Type"],
+    "command": "python3",
+    "args": ["main.py"],
+    "config_fields": []
+}
