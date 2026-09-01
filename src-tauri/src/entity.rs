@@ -50,3 +50,9 @@ impl Relationship {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransformResult {
+    pub entities: Vec<Entity>,
+    pub relationships: Vec<Relationship>,
+}
