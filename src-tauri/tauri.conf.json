@@ -10,6 +10,7 @@
     "frontendDist": "../frontend"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "EKUKE — Local OSINT Platform",
@@ -29,14 +30,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.png",
-      "icons/icon.ico"
-    ]
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"]
   },
   "plugins": {}
 }
