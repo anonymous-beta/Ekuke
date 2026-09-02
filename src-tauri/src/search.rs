@@ -6,7 +6,7 @@ use tantivy::{
     doc,
     query::QueryParser,
     schema::{Schema, STORED, TEXT, STRING},
-    Index, IndexReader, IndexWriter, ReloadPolicy,
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -35,7 +35,7 @@ impl SearchIndex {
         let reader: IndexReader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .build()?;
+            .try_into()?;
 
         Ok(Self {
             index: Arc::new(Mutex::new(index)),
@@ -90,7 +90,7 @@ impl SearchIndex {
 
         let mut results = Vec::new();
         for (_score, doc_address) in top_docs {
-            let retrieved_doc = searcher.doc(doc_address)?;
+            let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
             let id = retrieved_doc.get_first(id_field)
                 .and_then(|v| v.as_text())
                 .unwrap_or("")
