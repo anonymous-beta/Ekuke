@@ -31,7 +31,7 @@ impl SearchIndex {
         let index = Index::create_in_dir(path, schema.clone())
             .or_else(|_| Index::open_in_dir(path))?;
 
-        let mut writer = index.writer(50_000_000)?;
+        let writer = index.writer(50_000_000)?;
         let reader: IndexReader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -92,15 +92,15 @@ impl SearchIndex {
         for (_score, doc_address) in top_docs {
             let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
             let id = retrieved_doc.get_first(id_field)
-                .and_then(|v| v.as_text())
+                .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
             let entity_type = retrieved_doc.get_first(type_field)
-                .and_then(|v| v.as_text())
+                .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
             let label = retrieved_doc.get_first(label_field)
-                .and_then(|v| v.as_text())
+                .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
 
