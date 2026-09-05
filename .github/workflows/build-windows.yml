@@ -16,32 +16,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Debug - Find package.json
-        run: |
-          echo "Looking for package.json..."
-          dir /s package.json
-          echo "Looking for all json files..."
-          dir /s *.json
-        shell: cmd
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies
-        working-directory: ./src-tauri
-        run: npm install
-
       - name: Setup Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
           override: true
-
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli
 
       - name: Build Tauri app
         working-directory: ./src-tauri
