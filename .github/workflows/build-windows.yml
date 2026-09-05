@@ -1,45 +1,43 @@
-name: Build EKUKE Windows Installer
+# .github/workflows/build-windows.yml
+name: Build Windows
 
 on:
   push:
-    branches: [main, master]
+    branches: [ main ]
   pull_request:
-    branches: [main, master]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js (for Tauri icon generator)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: Generate icons from source PNG
-        run: npx --yes @tauri-apps/cli@latest icon src-tauri/icons/icon.png
+          override: true
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
+        run: cargo install tauri-cli
 
-      - name: Build EKUKE
-        run: cargo tauri build --verbose
+      - name: Build Tauri app
         working-directory: ./src-tauri
+        run: cargo tauri build
 
       - name: Upload NSIS installer (.exe)
         uses: actions/upload-artifact@v4
