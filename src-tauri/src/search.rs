@@ -1,20 +1,60 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use anyhow::Result;
-use chrono::Local;
-use tantivy::collector::{DocSetCollector, TopDocs};
-use tantivy::query::{AllQuery, FuzzyTermQuery, QueryParser, TermQuery};
-use tantivy::schema::{Field, Schema, Value, FAST, STORED, TEXT};
-use tantivy::{doc, Document, Index, IndexWriter, ReloadPolicy};
+use tantivy::collector::TopDocs;
+use tantivy::query::{AllQuery, QueryParser};
+use tantivy::schema::{Field, Schema, FAST, STORED, TEXT};
+use tantivy::{doc, Index, ReloadPolicy};
 use walkdir::WalkDir;
 
-use crate::models::{Note, SearchOptions, SearchResult, SearchResultItem};
+use crate::models::{Note, SearchOptions, SearchResultItem};
 use crate::utils::extract_text_from_file;
 
-/// Manages the search index for notes
-pub struct SearchEngine {
+/// Public wrapper for the search engine
+pub struct SearchIndex {
+    engine: SearchEngine,
+}
+
+impl SearchIndex {
+    pub fn new(index_path: &Path) -> Result<Self> {
+        let engine = SearchEngine::new(index_path)?;
+        Ok(Self { engine })
+    }
+
+    pub fn index_directory(&mut self, dir_path: &Path, extensions: &[&str]) -> Result<usize> {
+        self.engine.index_directory(dir_path, extensions)
+    }
+
+    pub fn add_note(&mut self, note: &Note) -> Result<()> {
+        self.engine.add_note(note)
+    }
+
+    pub fn remove_note(&mut self, path: &Path) -> Result<()> {
+        self.engine.remove_note(path)
+    }
+
+    pub fn update_note(&mut self, old_path: &Path, new_note: &Note) -> Result<()> {
+        self.engine.update_note(old_path, new_note)
+    }
+
+    pub fn search(&self, query: &str, options: &SearchOptions) -> Result<Vec<SearchResultItem>> {
+        self.engine.search(query, options)
+    }
+
+    pub fn all_notes(&self) -> Result<Vec<SearchResultItem>> {
+        self.engine.all_notes()
+    }
+
+    pub fn optimize(&mut self) -> Result<()> {
+        self.engine.optimize()
+    }
+
+    pub fn clear(&mut self) -> Result<()> {
+        self.engine.clear()
+    }
+}
+
+/// Internal search engine
+struct SearchEngine {
     index: Index,
     schema: Schema,
     title_field: Field,
@@ -25,8 +65,7 @@ pub struct SearchEngine {
 }
 
 impl SearchEngine {
-    /// Creates a new search engine with an index at the given path
-    pub fn new(index_path: &Path) -> Result<Self> {
+    fn new(index_path: &Path) -> Result<Self> {
         let mut schema_builder = Schema::builder();
         let title_field = schema_builder.add_text_field("title", TEXT | STORED);
         let content_field = schema_builder.add_text_field("content", TEXT | STORED);
@@ -47,30 +86,8 @@ impl SearchEngine {
         })
     }
 
-    /// Opens an existing index
-    pub fn open(index_path: &Path) -> Result<Self> {
-        let schema = Schema::load_from_file(index_path.join("meta.json"))?;
-        let index = Index::open(index_path)?;
-
-        let title_field = schema.get_field("title").unwrap();
-        let content_field = schema.get_field("content").unwrap();
-        let path_field = schema.get_field("path").unwrap();
-        let timestamp_field = schema.get_field("timestamp").unwrap();
-
-        Ok(Self {
-            index,
-            schema,
-            title_field,
-            content_field,
-            path_field,
-            timestamp_field,
-            index_path: index_path.to_path_buf(),
-        })
-    }
-
-    /// Indexes all notes in a directory recursively
-    pub fn index_directory(&mut self, dir_path: &Path, extensions: &[&str]) -> Result<usize> {
-        let writer = self.index.writer(50_000_000)?;
+    fn index_directory(&mut self, dir_path: &Path, extensions: &[&str]) -> Result<usize> {
+        let mut writer = self.index.writer(50_000_000)?;
         let mut count = 0;
 
         for entry in WalkDir::new(dir_path)
@@ -115,9 +132,8 @@ impl SearchEngine {
         Ok(count)
     }
 
-    /// Adds a single note to the index
-    pub fn add_note(&mut self, note: &Note) -> Result<()> {
-        let writer = self.index.writer(50_000_000)?;
+    fn add_note(&mut self, note: &Note) -> Result<()> {
+        let mut writer = self.index.writer(50_000_000)?;
         let doc = doc!(
             self.title_field => note.title.clone(),
             self.content_field => note.content.clone(),
@@ -129,9 +145,8 @@ impl SearchEngine {
         Ok(())
     }
 
-    /// Removes a note from the index by path
-    pub fn remove_note(&mut self, path: &Path) -> Result<()> {
-        let writer = self.index.writer(50_000_000)?;
+    fn remove_note(&mut self, path: &Path) -> Result<()> {
+        let mut writer = self.index.writer(50_000_000)?;
         let path_str = path.display().to_string();
         let term = tantivy::Term::from_field_text(self.path_field, &path_str);
         writer.delete_term(term);
@@ -139,8 +154,7 @@ impl SearchEngine {
         Ok(())
     }
 
-    /// Updates a note in the index (remove old, add new)
-    pub fn update_note(&mut self, old_path: &Path, new_note: &Note) -> Result<()> {
+    fn update_note(&mut self, old_path: &Path, new_note: &Note) -> Result<()> {
         if old_path != &new_note.path {
             self.remove_note(old_path)?;
         }
@@ -148,42 +162,17 @@ impl SearchEngine {
         Ok(())
     }
 
-    /// Searches the index with the given query and options
-    pub fn search(&self, query_str: &str, options: &SearchOptions) -> Result<Vec<SearchResultItem>> {
+    fn search(&self, query_str: &str, options: &SearchOptions) -> Result<Vec<SearchResultItem>> {
         let reader = self.index.reader_builder()
             .reload_policy(ReloadPolicy::OnCommit)
             .try_into()?;
 
         let searcher = reader.searcher();
-
         let query_parser = QueryParser::for_index(&self.index, vec![self.title_field, self.content_field]);
+        let query = query_parser.parse_query(query_str)?;
 
-        let query = if let Some(fuzzy_distance) = options.fuzzy_distance {
-            let terms: Vec<&str> = query_str.split_whitespace().collect();
-            let mut sub_queries: Vec<Box<dyn tantivy::query::Query>> = Vec::new();
-            for term in terms {
-                let q = FuzzyTermQuery::new(
-                    self.content_field,
-                    term.to_string(),
-                    fuzzy_distance,
-                    true,
-                );
-                sub_queries.push(Box::new(q));
-            }
-            if sub_queries.is_empty() {
-                return Ok(Vec::new());
-            }
-            Box::new(tantivy::query::BooleanQuery::new_multiterms(sub_queries))
-        } else {
-            query_parser.parse_query(query_str)?
-        };
-
-        let collector = if options.limit > 0 {
-            TopDocs::with_limit(options.limit)
-        } else {
-            TopDocs::with_limit(50)
-        };
-
+        let limit = if options.limit > 0 { options.limit } else { 50 };
+        let collector = TopDocs::with_limit(limit);
         let top_docs = searcher.search(&query, &collector)?;
 
         let mut results = Vec::new();
@@ -235,32 +224,29 @@ impl SearchEngine {
                 String::new()
             };
 
-            let item = SearchResultItem {
+            results.push(SearchResultItem {
                 title,
                 path: PathBuf::from(path_str),
                 content: snippet,
                 timestamp,
                 score: score as f32,
-            };
-
-            results.push(item);
+            });
         }
 
         Ok(results)
     }
 
-    /// Returns all indexed notes (for rebuilding UI)
-    pub fn all_notes(&self) -> Result<Vec<SearchResultItem>> {
+    fn all_notes(&self) -> Result<Vec<SearchResultItem>> {
         let reader = self.index.reader_builder()
             .reload_policy(ReloadPolicy::OnCommit)
             .try_into()?;
 
         let searcher = reader.searcher();
-        let collector = DocSetCollector::with_limit(usize::MAX);
-        let doc_addresses = searcher.search(&AllQuery, &collector)?;
+        let collector = TopDocs::with_limit(usize::MAX);
+        let top_docs = searcher.search(&AllQuery, &collector)?;
 
         let mut results = Vec::new();
-        for doc_address in doc_addresses {
+        for (_, doc_address) in top_docs {
             let retrieved = searcher.doc(doc_address)?;
             let title = retrieved
                 .get_first(self.title_field)
@@ -291,16 +277,14 @@ impl SearchEngine {
         Ok(results)
     }
 
-    /// Optimizes the index (merges segments)
-    pub fn optimize(&mut self) -> Result<()> {
-        let writer = self.index.writer(50_000_000)?;
-        writer.merge_segments(writer.merge_policy().clone())?;
+    fn optimize(&mut self) -> Result<()> {
+        let mut writer = self.index.writer(50_000_000)?;
+        writer.merge_segments(writer.get_merge_policy().clone())?;
         writer.commit()?;
         Ok(())
     }
 
-    /// Clears the entire index
-    pub fn clear(&mut self) -> Result<()> {
+    fn clear(&mut self) -> Result<()> {
         std::fs::remove_dir_all(&self.index_path)?;
         std::fs::create_dir_all(&self.index_path)?;
         let index = Index::create_in_dir(&self.index_path, self.schema.clone())?;
