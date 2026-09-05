@@ -16,9 +16,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Debug - List directory structure
+      - name: Debug - Find package.json
         run: |
-          dir /s /b *.json
+          echo "Looking for package.json..."
+          dir /s package.json
+          echo "Looking for all json files..."
+          dir /s *.json
         shell: cmd
 
       - name: Setup Node.js
