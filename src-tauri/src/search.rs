@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::Local;
 use tantivy::collector::{DocSetCollector, TopDocs};
-use tantivy::query::{FuzzyTermQuery, QueryParser, TermQuery};
-use tantivy::schema::{Schema, Field, Value, FAST, STORED, TEXT};
+use tantivy::query::{AllQuery, FuzzyTermQuery, QueryParser, TermQuery};
+use tantivy::schema::{Field, Schema, Value, FAST, STORED, TEXT};
 use tantivy::{doc, Document, Index, IndexWriter, ReloadPolicy};
 use walkdir::WalkDir;
 
@@ -257,7 +257,7 @@ impl SearchEngine {
 
         let searcher = reader.searcher();
         let collector = DocSetCollector::with_limit(usize::MAX);
-        let doc_addresses = searcher.search(&tantivy::query::AllQuery, &collector)?;
+        let doc_addresses = searcher.search(&AllQuery, &collector)?;
 
         let mut results = Vec::new();
         for doc_address in doc_addresses {
