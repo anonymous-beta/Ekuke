@@ -7,6 +7,8 @@ pub mod entity;
 pub mod config;
 pub mod crypto;
 pub mod cmd;
+pub mod models;
+pub mod utils;
 
 use std::path::PathBuf;
 use std::sync::Arc;
