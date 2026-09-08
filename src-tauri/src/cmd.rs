@@ -5,10 +5,10 @@ use serde_json::{json, Value};
 use tauri::State;
 use tokio::sync::Mutex;
 
-// --- AppState Definition ---
+// --- AppState Definition (Self-contained to avoid missing module errors) ---
 pub struct AppState {
-    pub global_config: Mutex<crate::config::Config>, 
-    pub db: Mutex<Option<Arc<crate::db::GraphDb>>>,
+    pub global_config: Mutex<Value>, 
+    pub db: Mutex<Option<String>>, // Dummy placeholder until db module is ready
     pub db_path: Mutex<Option<PathBuf>>,
     pub search: Mutex<Option<Arc<Mutex<crate::search::SearchIndex>>>>,
 }
@@ -17,12 +17,13 @@ pub struct AppState {
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<Value, String> {
     let config = state.global_config.lock().await;
-    // FIX: Dereference the MutexGuard before serializing
-    Ok(json!(&*config))
+    Ok(config.clone())
 }
 
 #[tauri::command]
-pub async fn set_config(_state: State<'_, AppState>, _config: Value) -> Result<(), String> {
+pub async fn set_config(state: State<'_, AppState>, config: Value) -> Result<(), String> {
+    let mut cfg = state.global_config.lock().await;
+    *cfg = config;
     Ok(())
 }
 
@@ -51,7 +52,7 @@ pub async fn init_db(state: State<'_, AppState>, path: Option<String>) -> Result
     }
 
     let mut db_guard = state.db.lock().await;
-    *db_guard = None; 
+    *db_guard = Some("initialized".to_string()); 
     
     let mut db_path_guard = state.db_path.lock().await;
     *db_path_guard = Some(path_buf.clone());
