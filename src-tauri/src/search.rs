@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, QueryParser};
-use tantivy::schema::{Field, Schema, FAST, STORED, TEXT};
+use tantivy::schema::{Field, Schema, FAST, STORED, TEXT, Value}; // <-- Added Value here
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
 use walkdir::WalkDir;
 
@@ -158,7 +158,6 @@ impl SearchEngine {
 
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
-            // FIX: Explicitly type the retrieved document as TantivyDocument
             let retrieved: TantivyDocument = searcher.doc(doc_address)?;
             
             let title = retrieved.get_first(self.title_field).and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
@@ -185,7 +184,6 @@ impl SearchEngine {
 
         let mut results = Vec::new();
         for (_, doc_address) in top_docs {
-            // FIX: Explicitly type the retrieved document as TantivyDocument
             let retrieved: TantivyDocument = searcher.doc(doc_address)?;
             
             let title = retrieved.get_first(self.title_field).and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
