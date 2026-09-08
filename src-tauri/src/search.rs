@@ -3,7 +3,7 @@ use anyhow::Result;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, QueryParser};
 use tantivy::schema::{Field, Schema, FAST, STORED, TEXT};
-use tantivy::{doc, Index, ReloadPolicy};
+use tantivy::{doc, Index, IndexWriter, ReloadPolicy};
 use walkdir::WalkDir;
 
 use crate::models::{Note, SearchOptions, SearchResultItem};
@@ -85,7 +85,8 @@ impl SearchEngine {
     }
 
     fn index_directory(&mut self, dir_path: &Path, extensions: &[&str]) -> Result<usize> {
-        let mut writer = self.index.writer(50_000_000)?;
+        // FIX: Explicit type annotation for Tantivy 0.22
+        let mut writer: IndexWriter = self.index.writer(50_000_000)?;
         let mut count = 0;
 
         for entry in WalkDir::new(dir_path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
@@ -117,7 +118,7 @@ impl SearchEngine {
     }
 
     fn add_note(&mut self, note: &Note) -> Result<()> {
-        let mut writer = self.index.writer(50_000_000)?;
+        let mut writer: IndexWriter = self.index.writer(50_000_000)?;
         let doc = doc!(
             self.title_field => note.title.clone(),
             self.content_field => note.content.clone(),
@@ -130,7 +131,7 @@ impl SearchEngine {
     }
 
     fn remove_note(&mut self, path: &Path) -> Result<()> {
-        let mut writer = self.index.writer(50_000_000)?;
+        let mut writer: IndexWriter = self.index.writer(50_000_000)?;
         let path_str = path.display().to_string();
         let term = tantivy::Term::from_field_text(self.path_field, &path_str);
         writer.delete_term(term);
@@ -147,7 +148,8 @@ impl SearchEngine {
     }
 
     fn search(&self, query_str: &str, options: &SearchOptions) -> Result<Vec<SearchResultItem>> {
-        let reader = self.index.reader_builder().reload_policy(ReloadPolicy::OnCommit).try_into()?;
+        // FIX: ReloadPolicy::OnCommit was renamed to OnCommitWithDelay in Tantivy 0.22 [[1]]
+        let reader = self.index.reader_builder().reload_policy(ReloadPolicy::OnCommitWithDelay).try_into()?;
         let searcher = reader.searcher();
         let query_parser = QueryParser::for_index(&self.index, vec![self.title_field, self.content_field]);
         let query = query_parser.parse_query(query_str)?;
@@ -159,7 +161,6 @@ impl SearchEngine {
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
             let retrieved = searcher.doc(doc_address)?;
-            // ... (keep your existing snippet extraction logic here) ...
             let title = retrieved.get_first(self.title_field).and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
             let path_str = retrieved.get_first(self.path_field).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let timestamp = retrieved.get_first(self.timestamp_field).and_then(|v| v.as_i64()).unwrap_or(0);
@@ -176,10 +177,9 @@ impl SearchEngine {
     }
 
     fn all_notes(&self) -> Result<Vec<SearchResultItem>> {
-        let reader = self.index.reader_builder().reload_policy(ReloadPolicy::OnCommit).try_into()?;
+        let reader = self.index.reader_builder().reload_policy(ReloadPolicy::OnCommitWithDelay).try_into()?;
         let searcher = reader.searcher();
         
-        // FIX: Changed from usize::MAX to a safe, reasonable limit to prevent memory panics
         let collector = TopDocs::with_limit(10000); 
         let top_docs = searcher.search(&AllQuery, &collector)?;
 
@@ -202,9 +202,17 @@ impl SearchEngine {
     }
 
     fn optimize(&mut self) -> Result<()> {
-        let mut writer = self.index.writer(50_000_000)?;
-        writer.merge_segments(writer.get_merge_policy().clone())?;
-        writer.commit()?;
+        // FIX: Use Tantivy 0.22's merge API instead of the removed merge_segments
+        let segment_ids: Vec<_> = self.index.searchable_segment_metas()?
+            .into_iter()
+            .map(|meta| meta.id())
+            .collect();
+        
+        if segment_ids.len() > 1 {
+            let mut writer: IndexWriter = self.index.writer(50_000_000)?;
+            writer.merge(&segment_ids).wait()?;
+            writer.commit()?;
+        }
         Ok(())
     }
 
