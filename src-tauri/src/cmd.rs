@@ -1,15 +1,13 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use anyhow::Result;
-use chrono::Local;
 use serde_json::{json, Value};
-use tauri::{AppHandle, State};
+use tauri::State;
 use tokio::sync::Mutex;
 
-// --- AppState Definition (Move to lib.rs or state.rs if preferred) ---
+// --- AppState Definition ---
 pub struct AppState {
-    pub global_config: Mutex<crate::config::Config>, // Ensure crate::config::Config exists or replace with a dummy struct
+    pub global_config: Mutex<crate::config::Config>, 
     pub db: Mutex<Option<Arc<crate::db::GraphDb>>>,
     pub db_path: Mutex<Option<PathBuf>>,
     pub search: Mutex<Option<Arc<Mutex<crate::search::SearchIndex>>>>,
@@ -19,13 +17,12 @@ pub struct AppState {
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<Value, String> {
     let config = state.global_config.lock().await;
-    Ok(json!(config))
+    // FIX: Dereference the MutexGuard before serializing
+    Ok(json!(&*config))
 }
 
 #[tauri::command]
-pub async fn set_config(state: State<'_, AppState>, config: Value) -> Result<(), String> {
-    let mut cfg = state.global_config.lock().await;
-    // *cfg = config; // Implement proper config parsing here
+pub async fn set_config(_state: State<'_, AppState>, _config: Value) -> Result<(), String> {
     Ok(())
 }
 
@@ -53,7 +50,6 @@ pub async fn init_db(state: State<'_, AppState>, path: Option<String>) -> Result
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // Stub: Replace with actual GraphDb::new(&path_buf)
     let mut db_guard = state.db.lock().await;
     *db_guard = None; 
     
@@ -64,33 +60,33 @@ pub async fn init_db(state: State<'_, AppState>, path: Option<String>) -> Result
 }
 
 #[tauri::command]
-pub async fn get_db_stats(state: State<'_, AppState>) -> Result<Value, String> {
+pub async fn get_db_stats(_state: State<'_, AppState>) -> Result<Value, String> {
     Ok(json!({"status": "ok", "notes_count": 0}))
 }
 
 // ─── Notes / Evidence ──────────────────────────────────
 #[tauri::command]
-pub async fn create_note(state: State<'_, AppState>, case_id: String, title: String, content: String, tags: Option<Vec<String>>) -> Result<String, String> {
+pub async fn create_note(_state: State<'_, AppState>, _case_id: String, _title: String, _content: String, _tags: Option<Vec<String>>) -> Result<String, String> {
     Ok(format!("note_{}", uuid::Uuid::new_v4()))
 }
 
 #[tauri::command]
-pub async fn get_note(state: State<'_, AppState>, note_id: String) -> Result<Value, String> {
-    Ok(json!({"id": note_id, "title": "Stub Note", "content": "Stub content"}))
+pub async fn get_note(_state: State<'_, AppState>, _note_id: String) -> Result<Value, String> {
+    Ok(json!({"id": _note_id, "title": "Stub Note", "content": "Stub content"}))
 }
 
 #[tauri::command]
-pub async fn update_note(state: State<'_, AppState>, note_id: String, title: String, content: String) -> Result<(), String> {
+pub async fn update_note(_state: State<'_, AppState>, _note_id: String, _title: String, _content: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_note(state: State<'_, AppState>, note_id: String) -> Result<(), String> {
+pub async fn delete_note(_state: State<'_, AppState>, _note_id: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn list_notes(state: State<'_, AppState>, case_id: Option<String>) -> Result<Vec<Value>, String> {
+pub async fn list_notes(_state: State<'_, AppState>, _case_id: Option<String>) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
@@ -113,140 +109,139 @@ pub async fn initialize_search(state: State<'_, AppState>) -> Result<(), String>
         let _ = fs::create_dir_all(parent);
     }
     
-    // Stub: Replace with actual SearchIndex::new(&index_path)
     *search_guard = None;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn search_notes(state: State<'_, AppState>, query: String) -> Result<Vec<Value>, String> {
+pub async fn search_notes(_state: State<'_, AppState>, _query: String) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
 #[tauri::command]
-pub async fn search_exact(state: State<'_, AppState>, query: String) -> Result<Vec<Value>, String> {
+pub async fn search_exact(_state: State<'_, AppState>, _query: String) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
 // ─── Case Management ──────────────────────────────────
 #[tauri::command]
-pub async fn create_case(state: State<'_, AppState>, name: String, description: Option<String>) -> Result<String, String> {
+pub async fn create_case(_state: State<'_, AppState>, _name: String, _description: Option<String>) -> Result<String, String> {
     Ok(format!("case_{}", uuid::Uuid::new_v4()))
 }
 
 #[tauri::command]
-pub async fn get_case(state: State<'_, AppState>, case_id: String) -> Result<Value, String> {
-    Ok(json!({"id": case_id, "name": "Stub Case"}))
+pub async fn get_case(_state: State<'_, AppState>, _case_id: String) -> Result<Value, String> {
+    Ok(json!({"id": _case_id, "name": "Stub Case"}))
 }
 
 #[tauri::command]
-pub async fn list_cases(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+pub async fn list_cases(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
 #[tauri::command]
-pub async fn update_case_status(state: State<'_, AppState>, case_id: String, status: String) -> Result<(), String> {
+pub async fn update_case_status(_state: State<'_, AppState>, _case_id: String, _status: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_case(state: State<'_, AppState>, case_id: String) -> Result<(), String> {
+pub async fn delete_case(_state: State<'_, AppState>, _case_id: String) -> Result<(), String> {
     Ok(())
 }
 
 // ─── Entities & Relations ─────────────────────────────
 #[tauri::command]
-pub async fn create_entity(state: State<'_, AppState>, name: String, entity_type: String) -> Result<String, String> {
+pub async fn create_entity(_state: State<'_, AppState>, _name: String, _entity_type: String) -> Result<String, String> {
     Ok(format!("entity_{}", uuid::Uuid::new_v4()))
 }
 
 #[tauri::command]
-pub async fn get_entity(state: State<'_, AppState>, entity_id: String) -> Result<Value, String> {
-    Ok(json!({"id": entity_id}))
+pub async fn get_entity(_state: State<'_, AppState>, _entity_id: String) -> Result<Value, String> {
+    Ok(json!({"id": _entity_id}))
 }
 
 #[tauri::command]
-pub async fn list_entities(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+pub async fn list_entities(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
 #[tauri::command]
-pub async fn update_entity(state: State<'_, AppState>, entity_id: String, name: String) -> Result<(), String> {
+pub async fn update_entity(_state: State<'_, AppState>, _entity_id: String, _name: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_entity(state: State<'_, AppState>, entity_id: String) -> Result<(), String> {
+pub async fn delete_entity(_state: State<'_, AppState>, _entity_id: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn create_relation(state: State<'_, AppState>, source_id: String, target_id: String, relation_type: String) -> Result<String, String> {
+pub async fn create_relation(_state: State<'_, AppState>, _source_id: String, _target_id: String, _relation_type: String) -> Result<String, String> {
     Ok(format!("rel_{}", uuid::Uuid::new_v4()))
 }
 
 #[tauri::command]
-pub async fn get_relations(state: State<'_, AppState>, entity_id: String) -> Result<Vec<Value>, String> {
+pub async fn get_relations(_state: State<'_, AppState>, _entity_id: String) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
 #[tauri::command]
-pub async fn delete_relation(state: State<'_, AppState>, relation_id: String) -> Result<(), String> {
+pub async fn delete_relation(_state: State<'_, AppState>, _relation_id: String) -> Result<(), String> {
     Ok(())
 }
 
 // ─── Tags ─────────────────────────────────────────────
 #[tauri::command]
-pub async fn add_tag(state: State<'_, AppState>, item_id: String, tag: String) -> Result<(), String> {
+pub async fn add_tag(_state: State<'_, AppState>, _item_id: String, _tag: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn remove_tag(state: State<'_, AppState>, item_id: String, tag: String) -> Result<(), String> {
+pub async fn remove_tag(_state: State<'_, AppState>, _item_id: String, _tag: String) -> Result<(), String> {
     Ok(())
 }
 
 // ─── Encryption ───────────────────────────────────────
 #[tauri::command]
-pub async fn encrypt_text(state: State<'_, AppState>, text: String) -> Result<String, String> {
+pub async fn encrypt_text(_state: State<'_, AppState>, text: String) -> Result<String, String> {
     Ok(format!("encrypted_{}", text))
 }
 
 #[tauri::command]
-pub async fn decrypt_text(state: State<'_, AppState>, encrypted_text: String) -> Result<String, String> {
+pub async fn decrypt_text(_state: State<'_, AppState>, encrypted_text: String) -> Result<String, String> {
     Ok(encrypted_text.replace("encrypted_", ""))
 }
 
 // ─── Collection ───────────────────────────────────────
 #[tauri::command]
-pub async fn collect_files(state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<String>, String> {
+pub async fn collect_files(_state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
 #[tauri::command]
-pub async fn get_collected_files(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+pub async fn get_collected_files(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
 // ─── Plugins ──────────────────────────────────────────
 #[tauri::command]
-pub async fn load_plugin(state: State<'_, AppState>, plugin_path: String) -> Result<(), String> {
+pub async fn load_plugin(_state: State<'_, AppState>, _plugin_path: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn list_plugins(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+pub async fn list_plugins(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
 #[tauri::command]
-pub async fn run_plugin(state: State<'_, AppState>, plugin_name: String, args: Value) -> Result<Value, String> {
+pub async fn run_plugin(_state: State<'_, AppState>, _plugin_name: String, _args: Value) -> Result<Value, String> {
     Ok(json!({"status": "success"}))
 }
 
 // ─── Export ───────────────────────────────────────────
 #[tauri::command]
-pub async fn export_case(state: State<'_, AppState>, case_id: String, format: String) -> Result<String, String> {
+pub async fn export_case(_state: State<'_, AppState>, _case_id: String, _format: String) -> Result<String, String> {
     Ok("/path/to/exported/file".to_string())
 }
 
