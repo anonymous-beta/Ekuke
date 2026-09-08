@@ -3,7 +3,7 @@ use anyhow::Result;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, QueryParser};
 use tantivy::schema::{Field, Schema, FAST, STORED, TEXT};
-use tantivy::{doc, Index, IndexWriter, ReloadPolicy};
+use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
 use walkdir::WalkDir;
 
 use crate::models::{Note, SearchOptions, SearchResultItem};
@@ -85,7 +85,6 @@ impl SearchEngine {
     }
 
     fn index_directory(&mut self, dir_path: &Path, extensions: &[&str]) -> Result<usize> {
-        // FIX: Explicit type annotation for Tantivy 0.22
         let mut writer: IndexWriter = self.index.writer(50_000_000)?;
         let mut count = 0;
 
@@ -148,7 +147,6 @@ impl SearchEngine {
     }
 
     fn search(&self, query_str: &str, options: &SearchOptions) -> Result<Vec<SearchResultItem>> {
-        // FIX: ReloadPolicy::OnCommit was renamed to OnCommitWithDelay in Tantivy 0.22 [[1]]
         let reader = self.index.reader_builder().reload_policy(ReloadPolicy::OnCommitWithDelay).try_into()?;
         let searcher = reader.searcher();
         let query_parser = QueryParser::for_index(&self.index, vec![self.title_field, self.content_field]);
@@ -160,7 +158,9 @@ impl SearchEngine {
 
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
-            let retrieved = searcher.doc(doc_address)?;
+            // FIX: Explicitly type the retrieved document as TantivyDocument
+            let retrieved: TantivyDocument = searcher.doc(doc_address)?;
+            
             let title = retrieved.get_first(self.title_field).and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
             let path_str = retrieved.get_first(self.path_field).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let timestamp = retrieved.get_first(self.timestamp_field).and_then(|v| v.as_i64()).unwrap_or(0);
@@ -185,7 +185,9 @@ impl SearchEngine {
 
         let mut results = Vec::new();
         for (_, doc_address) in top_docs {
-            let retrieved = searcher.doc(doc_address)?;
+            // FIX: Explicitly type the retrieved document as TantivyDocument
+            let retrieved: TantivyDocument = searcher.doc(doc_address)?;
+            
             let title = retrieved.get_first(self.title_field).and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
             let path_str = retrieved.get_first(self.path_field).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let timestamp = retrieved.get_first(self.timestamp_field).and_then(|v| v.as_i64()).unwrap_or(0);
@@ -202,7 +204,6 @@ impl SearchEngine {
     }
 
     fn optimize(&mut self) -> Result<()> {
-        // FIX: Use Tantivy 0.22's merge API instead of the removed merge_segments
         let segment_ids: Vec<_> = self.index.searchable_segment_metas()?
             .into_iter()
             .map(|meta| meta.id())
