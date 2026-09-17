@@ -14,9 +14,13 @@
             <div class="section">
                 <button id="btn-new-case" class="btn primary">New Case</button>
                 <button id="btn-open-case" class="btn">Open Case</button>
-                <button id="btn-save-case" class="btn">Save Case</button>
                 <button id="btn-export-case" class="btn">Export .ekuke</button>
                 <button id="btn-import-case" class="btn">Import .ekuke</button>
+                <button id="btn-delete-case" class="btn danger">Delete Current Case</button>
+            </div>
+            <div class="section">
+                <h3>AI Assistant</h3>
+                <button id="btn-ai-chat" class="btn ai">🤖 Ask EKUKE AI</button>
             </div>
             <div class="section">
                 <h3>Entities</h3>
@@ -26,8 +30,12 @@
                 <h3>Plugins</h3>
                 <div id="plugin-list"></div>
             </div>
+            <div class="section">
+                <h3>App</h3>
+                <button id="btn-settings" class="btn">⚙ Settings</button>
+            </div>
         </div>
-        
+
         <div id="main">
             <div id="toolbar">
                 <input type="text" id="search-bar" placeholder="Search entities...">
@@ -37,11 +45,90 @@
             </div>
             <div id="graph-container"></div>
         </div>
-        
+
         <div id="detail-panel" class="hidden">
             <h3>Details</h3>
             <div id="detail-content"></div>
             <button id="btn-close-detail" class="btn">Close</button>
+        </div>
+    </div>
+
+    <!-- AI chat dialog -->
+    <div id="ai-panel" class="hidden">
+        <div id="ai-header">
+            <span>EKUKE AI Assistant</span>
+            <button id="btn-ai-close" class="btn small">✕</button>
+        </div>
+        <div id="ai-messages"></div>
+        <div id="ai-input-row">
+            <input type="text" id="ai-input" placeholder="e.g. Find who owns example.com and enrich it...">
+            <button id="btn-ai-send" class="btn primary">Send</button>
+        </div>
+    </div>
+
+    <!-- Settings dialog -->
+    <div id="settings-overlay" class="hidden">
+        <div id="settings" class="modal">
+            <h3>⚙ Settings</h3>
+            <div class="tabs">
+                <button class="tab active" data-tab="tab-ai">AI Assistant</button>
+                <button class="tab" data-tab="tab-api">API Keys</button>
+                <button class="tab" data-tab="tab-adv">Advanced</button>
+            </div>
+            <div id="tab-ai" class="tab-body">
+                <div class="detail-row">
+                    <label>Enable AI Assistant</label>
+                    <select id="set-ai-enabled"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+                </div>
+                <div class="detail-row">
+                    <label>API Base URL (OpenAI-compatible)</label>
+                    <input type="text" id="set-ai-url" placeholder="https://api.openai.com/v1">
+                </div>
+                <div class="detail-row">
+                    <label>API Key</label>
+                    <input type="password" id="set-ai-key" placeholder="sk-...">
+                </div>
+                <div class="detail-row">
+                    <label>Model</label>
+                    <input type="text" id="set-ai-model" placeholder="gpt-4o-mini">
+                </div>
+                <button id="btn-ai-test" class="btn">Test Connection</button>
+                <span id="ai-test-result"></span>
+            </div>
+            <div id="tab-api" class="tab-body hidden">
+                <p class="muted">Keys are passed to plugins (e.g. shodan-enrichment) as config values.</p>
+                <div class="detail-row">
+                    <label>Shodan API Key</label>
+                    <input type="password" id="set-key-shodan" placeholder="Shodan key">
+                </div>
+                <div class="detail-row">
+                    <label>Other key (name)</label>
+                    <input type="text" id="set-key-name" placeholder="e.g. hunter">
+                </div>
+                <div class="detail-row">
+                    <label>Other key (value)</label>
+                    <input type="password" id="set-key-value" placeholder="value">
+                </div>
+                <button id="btn-add-key" class="btn">Save Extra Key</button>
+            </div>
+            <div id="tab-adv" class="tab-body hidden">
+                <div class="detail-row">
+                    <label>Default Author</label>
+                    <input type="text" id="set-author">
+                </div>
+                <div class="detail-row">
+                    <label>Plugins Directory</label>
+                    <input type="text" id="set-plugins-dir">
+                </div>
+                <div class="detail-row">
+                    <label>Cases Directory</label>
+                    <input type="text" id="set-cases-dir">
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button id="settings-cancel" class="btn">Cancel</button>
+                <button id="settings-save" class="btn primary">Save</button>
+            </div>
         </div>
     </div>
 
