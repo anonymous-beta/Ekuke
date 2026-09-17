@@ -1,284 +1,407 @@
-use std::fs;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
 use serde_json::{json, Value};
 use tauri::State;
 use tokio::sync::Mutex;
 
-// --- AppState Definition (Self-contained to avoid missing module errors) ---
-pub struct AppState {
-    pub global_config: Mutex<Value>, 
-    pub db: Mutex<Option<String>>, // Dummy placeholder until db module is ready
-    pub db_path: Mutex<Option<PathBuf>>,
-    pub search: Mutex<Option<Arc<Mutex<crate::search::SearchIndex>>>>,
+use crate::ai::{AiClient, ChatMessage};
+use crate::case::{CaseMetadata, CasePaths};
+use crate::collect::Collector;
+use crate::config::Config;
+use crate::db::GraphDb;
+use crate::entity::{Entity, Relationship};
+use crate::plugin::{PluginEngine, PluginOutput};
+
+type Cmd<T> = Result<T, String>;
+
+async fn require_db(state: &State<'_, crate::AppState>) -> Cmd<Arc<GraphDb>> {
+    state.db.lock().await.clone()
+        .ok_or_else(|| "No case is open. Create or open a case first.".to_string())
 }
 
-// ─── Config ─────────────────────────────────────────────
+async fn require_config(state: &State<'_, crate::AppState>) -> Cmd<Config> {
+    Ok(state.config.lock().await.clone())
+}
+
+fn save_case_meta(root: &PathBuf, meta: &CaseMetadata) -> Cmd<()> {
+    let mut v = serde_json::to_value(meta).map_err(|e| e.to_string())?;
+    v["status"] = json!("open");
+    std::fs::write(root.join("case.json"), serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+// ─── Config / Settings ────────────────────────────────
 #[tauri::command]
-pub async fn get_config(state: State<'_, AppState>) -> Result<Value, String> {
-    let config = state.global_config.lock().await;
-    Ok(config.clone())
+pub async fn get_config(state: State<'_, crate::AppState>) -> Cmd<Value> {
+    let cfg = state.config.lock().await;
+    serde_json::to_value(&*cfg).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_config(state: State<'_, AppState>, config: Value) -> Result<(), String> {
-    let mut cfg = state.global_config.lock().await;
-    *cfg = config;
+pub async fn set_config(state: State<'_, crate::AppState>, config: Value) -> Cmd<()> {
+    let new_cfg: Config = serde_json::from_value(config).map_err(|e| e.to_string())?;
+    new_cfg.save().map_err(|e| e.to_string())?;
+    *state.config.lock().await = new_cfg;
     Ok(())
 }
 
+// ─── Cases ────────────────────────────────────────────
 #[tauri::command]
-pub async fn set_db_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    let mut db_path_guard = state.db_path.lock().await;
-    *db_path_guard = Some(PathBuf::from(path));
-    Ok(())
+pub async fn create_case(state: State<'_, crate::AppState>, name: String) -> Cmd<Value> {
+    let cfg = require_config(&state).await?;
+    let mut meta = CaseMetadata::new(&name, &cfg.default_author);
+    let paths = CasePaths::from_root(cfg.cases_dir.join(&meta.id));
+    paths.ensure_dirs().map_err(|e| e.to_string())?;
+    save_case_meta(&paths.root, &meta)?;
+
+    let db = GraphDb::new(&paths.db).map_err(|e| e.to_string())?;
+    *state.case_config.lock().await = Some(meta.clone());
+    *state.db.lock().await = Some(Arc::new(db));
+    *state.db_path.lock().await = Some(paths.db.clone());
+
+    Ok(json!({"id": meta.id, "name": meta.name, "root": paths.root.display().to_string()}))
 }
 
-// ─── Database ─────────────────────────────────────────
+fn read_case(root: &PathBuf) -> Cmd<(CaseMetadata, String)> {
+    let content = std::fs::read_to_string(root.join("case.json")).map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let meta: CaseMetadata = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("open").to_string();
+    Ok((meta, status))
+}
+
 #[tauri::command]
-pub async fn init_db(state: State<'_, AppState>, path: Option<String>) -> Result<String, String> {
-    let path_buf = match path {
-        Some(p) => PathBuf::from(p),
-        None => {
-            let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-            p.push(".ekuke");
-            p.push("db");
-            p
+pub async fn list_cases(state: State<'_, crate::AppState>) -> Cmd<Vec<Value>> {
+    let cfg = require_config(&state).await?;
+    let mut out = Vec::new();
+    if !cfg.cases_dir.exists() { return Ok(out); }
+    for entry in std::fs::read_dir(&cfg.cases_dir).map_err(|e| e.to_string())? {
+        let root = entry.map_err(|e| e.to_string())?.path();
+        if root.is_dir() && root.join("case.json").exists() {
+            if let Ok((meta, status)) = read_case(&root) {
+                out.push(json!({
+                    "id": meta.id, "name": meta.name, "description": meta.description,
+                    "created_at": meta.created_at, "status": status,
+                }));
+            }
         }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn open_case(state: State<'_, crate::AppState>, case_id: String) -> Cmd<Value> {
+    let cfg = require_config(&state).await?;
+    let root = cfg.cases_dir.join(&case_id);
+    if !root.join("case.json").exists() { return Err("Case not found".into()); }
+    let (meta, _) = read_case(&root)?;
+    let paths = CasePaths::from_root(root);
+    let db = GraphDb::new(&paths.db).map_err(|e| e.to_string())?;
+    *state.case_config.lock().await = Some(meta.clone());
+    *state.db.lock().await = Some(Arc::new(db));
+    *state.db_path.lock().await = Some(paths.db.clone());
+    Ok(json!({"id": meta.id, "name": meta.name}))
+}
+
+#[tauri::command]
+pub async fn delete_case(state: State<'_, crate::AppState>, case_id: String) -> Cmd<()> {
+    let cfg = require_config(&state).await?;
+    let root = cfg.cases_dir.join(&case_id);
+    if !root.exists() { return Err("Case not found".into()); }
+    std::fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+    let open = state.case_config.lock().await.clone();
+    if let Some(meta) = open {
+        if meta.id == case_id {
+            *state.case_config.lock().await = None;
+            *state.db.lock().await = None;
+            *state.db_path.lock().await = None;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_current_case(state: State<'_, crate::AppState>) -> Cmd<Value> {
+    let open = state.case_config.lock().await.clone();
+    match open {
+        Some(meta) => Ok(json!({"id": meta.id, "name": meta.name})),
+        None => Ok(Value::Null),
+    }
+}
+
+// ─── Entities ─────────────────────────────────────────
+#[tauri::command]
+pub async fn get_entities(state: State<'_, crate::AppState>, entity_type: Option<String>) -> Cmd<Vec<Value>> {
+    let db = require_db(&state).await?;
+    let entities = match entity_type {
+        Some(t) if !t.is_empty() => db.search_entities_by_type(&t).map_err(|e| e.to_string())?,
+        _ => db.get_all_entities().map_err(|e| e.to_string())?,
     };
+    Ok(entities.iter().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)).collect())
+}
 
-    if let Some(parent) = path_buf.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn get_entity_by_id(state: State<'_, crate::AppState>, id: String) -> Cmd<Value> {
+    let db = require_db(&state).await?;
+    let e = db.get_entity_by_id(&id).map_err(|e| e.to_string())?
+        .ok_or_else(|| "Entity not found".to_string())?;
+    serde_json::to_value(&e).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn create_entity(
+    state: State<'_, crate::AppState>,
+    entity_type: String,
+    label: String,
+    properties: Option<Value>,
+) -> Cmd<Value> {
+    let db = require_db(&state).await?;
+    if let Some(id) = db.entity_exists_by_label(&entity_type, &label).map_err(|e| e.to_string())? {
+        if let Some(e) = db.get_entity_by_id(&id).map_err(|e| e.to_string())? {
+            return serde_json::to_value(&e).map_err(|e| e.to_string());
+        }
     }
-
-    let mut db_guard = state.db.lock().await;
-    *db_guard = Some("initialized".to_string()); 
-    
-    let mut db_path_guard = state.db_path.lock().await;
-    *db_path_guard = Some(path_buf.clone());
-
-    Ok(path_buf.display().to_string())
-}
-
-#[tauri::command]
-pub async fn get_db_stats(_state: State<'_, AppState>) -> Result<Value, String> {
-    Ok(json!({"status": "ok", "notes_count": 0}))
-}
-
-// ─── Notes / Evidence ──────────────────────────────────
-#[tauri::command]
-pub async fn create_note(_state: State<'_, AppState>, _case_id: String, _title: String, _content: String, _tags: Option<Vec<String>>) -> Result<String, String> {
-    Ok(format!("note_{}", uuid::Uuid::new_v4()))
-}
-
-#[tauri::command]
-pub async fn get_note(_state: State<'_, AppState>, _note_id: String) -> Result<Value, String> {
-    Ok(json!({"id": _note_id, "title": "Stub Note", "content": "Stub content"}))
-}
-
-#[tauri::command]
-pub async fn update_note(_state: State<'_, AppState>, _note_id: String, _title: String, _content: String) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn delete_note(_state: State<'_, AppState>, _note_id: String) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn list_notes(_state: State<'_, AppState>, _case_id: Option<String>) -> Result<Vec<Value>, String> {
-    Ok(vec![])
-}
-
-// ─── Search ────────────────────────────────────────────
-#[tauri::command]
-pub async fn initialize_search(state: State<'_, AppState>) -> Result<(), String> {
-    let mut search_guard = state.search.lock().await;
-    if search_guard.is_some() {
-        return Ok(());
+    let mut entity = Entity::new(&entity_type, &label);
+    if let Some(Value::Object(map)) = properties {
+        for (k, v) in map { entity.properties.insert(k, v); }
     }
-    
-    let index_path = {
-        let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        p.push(".ekuke");
-        p.push("search_index");
-        p
-    };
-    
-    if let Some(parent) = index_path.parent() {
-        let _ = fs::create_dir_all(parent);
+    db.insert_entity(&entity).map_err(|e| e.to_string())?;
+    serde_json::to_value(&entity).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_entity(
+    state: State<'_, crate::AppState>,
+    id: String,
+    label: String,
+    properties: Option<Value>,
+) -> Cmd<Value> {
+    let db = require_db(&state).await?;
+    let mut e = db.get_entity_by_id(&id).map_err(|e| e.to_string())?
+        .ok_or_else(|| "Entity not found".to_string())?;
+    e.label = label;
+    if let Some(Value::Object(map)) = properties {
+        for (k, v) in map { e.properties.insert(k, v); }
     }
-    
-    *search_guard = None;
-    Ok(())
+    e.updated_at = chrono::Utc::now();
+    db.update_entity(&e).map_err(|e| e.to_string())?;
+    serde_json::to_value(&e).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn search_notes(_state: State<'_, AppState>, _query: String) -> Result<Vec<Value>, String> {
-    Ok(vec![])
+pub async fn delete_entity(state: State<'_, crate::AppState>, id: String) -> Cmd<()> {
+    let db = require_db(&state).await?;
+    db.delete_entity(&id).map_err(|e| e.to_string())
+}
+
+// ─── Relationships ────────────────────────────────────
+#[tauri::command]
+pub async fn create_relationship(
+    state: State<'_, crate::AppState>,
+    source_id: String,
+    target_id: String,
+    rel_type: String,
+    properties: Option<Value>,
+) -> Cmd<Value> {
+    let db = require_db(&state).await?;
+    if db.get_entity_by_id(&source_id).map_err(|e| e.to_string())?.is_none() {
+        return Err("Source entity not found".into());
+    }
+    if db.get_entity_by_id(&target_id).map_err(|e| e.to_string())?.is_none() {
+        return Err("Target entity not found".into());
+    }
+    let mut rel = Relationship::new(&rel_type, &source_id, &target_id);
+    if let Some(Value::Object(map)) = properties {
+        for (k, v) in map { rel.properties.insert(k, v); }
+    }
+    db.add_relationship(&rel).map_err(|e| e.to_string())?;
+    serde_json::to_value(&rel).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn search_exact(_state: State<'_, AppState>, _query: String) -> Result<Vec<Value>, String> {
-    Ok(vec![])
-}
-
-// ─── Case Management ──────────────────────────────────
-#[tauri::command]
-pub async fn create_case(_state: State<'_, AppState>, _name: String, _description: Option<String>) -> Result<String, String> {
-    Ok(format!("case_{}", uuid::Uuid::new_v4()))
+pub async fn get_relationships(state: State<'_, crate::AppState>) -> Cmd<Vec<Value>> {
+    let db = require_db(&state).await?;
+    let rels = db.get_relationships().map_err(|e| e.to_string())?;
+    Ok(rels.iter().map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect())
 }
 
 #[tauri::command]
-pub async fn get_case(_state: State<'_, AppState>, _case_id: String) -> Result<Value, String> {
-    Ok(json!({"id": _case_id, "name": "Stub Case"}))
-}
-
-#[tauri::command]
-pub async fn list_cases(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
-    Ok(vec![])
-}
-
-#[tauri::command]
-pub async fn update_case_status(_state: State<'_, AppState>, _case_id: String, _status: String) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn delete_case(_state: State<'_, AppState>, _case_id: String) -> Result<(), String> {
-    Ok(())
-}
-
-// ─── Entities & Relations ─────────────────────────────
-#[tauri::command]
-pub async fn create_entity(_state: State<'_, AppState>, _name: String, _entity_type: String) -> Result<String, String> {
-    Ok(format!("entity_{}", uuid::Uuid::new_v4()))
-}
-
-#[tauri::command]
-pub async fn get_entity(_state: State<'_, AppState>, _entity_id: String) -> Result<Value, String> {
-    Ok(json!({"id": _entity_id}))
-}
-
-#[tauri::command]
-pub async fn list_entities(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
-    Ok(vec![])
-}
-
-#[tauri::command]
-pub async fn update_entity(_state: State<'_, AppState>, _entity_id: String, _name: String) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn delete_entity(_state: State<'_, AppState>, _entity_id: String) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn create_relation(_state: State<'_, AppState>, _source_id: String, _target_id: String, _relation_type: String) -> Result<String, String> {
-    Ok(format!("rel_{}", uuid::Uuid::new_v4()))
-}
-
-#[tauri::command]
-pub async fn get_relations(_state: State<'_, AppState>, _entity_id: String) -> Result<Vec<Value>, String> {
-    Ok(vec![])
-}
-
-#[tauri::command]
-pub async fn delete_relation(_state: State<'_, AppState>, _relation_id: String) -> Result<(), String> {
-    Ok(())
-}
-
-// ─── Tags ─────────────────────────────────────────────
-#[tauri::command]
-pub async fn add_tag(_state: State<'_, AppState>, _item_id: String, _tag: String) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn remove_tag(_state: State<'_, AppState>, _item_id: String, _tag: String) -> Result<(), String> {
-    Ok(())
-}
-
-// ─── Encryption ───────────────────────────────────────
-#[tauri::command]
-pub async fn encrypt_text(_state: State<'_, AppState>, text: String) -> Result<String, String> {
-    Ok(format!("encrypted_{}", text))
-}
-
-#[tauri::command]
-pub async fn decrypt_text(_state: State<'_, AppState>, encrypted_text: String) -> Result<String, String> {
-    Ok(encrypted_text.replace("encrypted_", ""))
-}
-
-// ─── Collection ───────────────────────────────────────
-#[tauri::command]
-pub async fn collect_files(_state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<String>, String> {
-    Ok(paths)
-}
-
-#[tauri::command]
-pub async fn get_collected_files(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
-    Ok(vec![])
+pub async fn search_entities(state: State<'_, crate::AppState>, query: String, limit: Option<usize>) -> Cmd<Vec<Value>> {
+    let db = require_db(&state).await?;
+    let entities = db.search_entities_by_label(&query, limit.unwrap_or(20)).map_err(|e| e.to_string())?;
+    Ok(entities.iter().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)).collect())
 }
 
 // ─── Plugins ──────────────────────────────────────────
 #[tauri::command]
-pub async fn load_plugin(_state: State<'_, AppState>, _plugin_path: String) -> Result<(), String> {
-    Ok(())
+pub async fn get_plugins(state: State<'_, crate::AppState>) -> Cmd<Vec<Value>> {
+    let cfg = require_config(&state).await?;
+    let engine = PluginEngine::new(&cfg.plugins_dir);
+    let manifests = engine.discover_plugins().map_err(|e| e.to_string())?;
+    Ok(manifests.iter().map(|m| serde_json::to_value(m).unwrap_or(Value::Null)).collect())
 }
 
 #[tauri::command]
-pub async fn list_plugins(_state: State<'_, AppState>) -> Result<Vec<Value>, String> {
-    Ok(vec![])
+pub async fn run_transform(
+    state: State<'_, crate::AppState>,
+    plugin_id: String,
+    entity_id: String,
+    config: Option<Value>,
+) -> Cmd<Value> {
+    let db = require_db(&state).await?;
+    let cfg = require_config(&state).await?;
+    let engine = PluginEngine::new(&cfg.plugins_dir);
+    let manifests = engine.discover_plugins().map_err(|e| e.to_string())?;
+    let manifest = manifests.iter().find(|m| m.id == plugin_id)
+        .ok_or_else(|| format!("Plugin '{}' not found in {:?}", plugin_id, cfg.plugins_dir))?;
+    let entity = db.get_entity_by_id(&entity_id).map_err(|e| e.to_string())?
+        .ok_or_else(|| "Entity not found".to_string())?;
+
+    let mut plugin_config: HashMap<String, String> = cfg.api_keys.clone();
+    if let Some(Value::Object(map)) = config {
+        for (k, v) in map {
+            if let Some(s) = v.as_str() { plugin_config.insert(k, s.to_string()); }
+        }
+    }
+
+    let output: PluginOutput = engine.execute(manifest, &entity, &plugin_config).await.map_err(|e| e.to_string())?;
+
+    let mut ids: HashMap<(String, String), String> = HashMap::new();
+    ids.insert((entity.entity_type.clone(), entity.label.clone()), entity.id.clone());
+    for pe in &output.entities {
+        let id = if let Some(existing) = db.entity_exists_by_label(&pe.entity_type, &pe.label).map_err(|e| e.to_string())? {
+            existing
+        } else {
+            let mut e = Entity::new(&pe.entity_type, &pe.label);
+            e.properties = pe.properties.clone();
+            db.insert_entity(&e).map_err(|err| err.to_string())?;
+            e.id
+        };
+        ids.insert((pe.entity_type.clone(), pe.label.clone()), id);
+    }
+    let mut rel_count = 0;
+    for pr in &output.relationships {
+        if let (Some(s), Some(t)) = (
+            ids.get(&(pr.source_type.clone(), pr.source_label.clone())),
+            ids.get(&(pr.target_type.clone(), pr.target_label.clone())),
+        ) {
+            db.add_relationship(&Relationship::new(&pr.rel_type, s, t)).map_err(|e| e.to_string())?;
+            rel_count += 1;
+        }
+    }
+    Ok(json!({"entities": output.entities.len(), "relationships": rel_count}))
+}
+
+// ─── Text extraction ──────────────────────────────────
+#[tauri::command]
+pub async fn extract_entities_from_text(state: State<'_, crate::AppState>, text: String) -> Cmd<usize> {
+    let db = require_db(&state).await?;
+    let collector = Collector::new();
+    let entities = collector.extract_entities_from_text(&text).map_err(|e| e.to_string())?;
+    let mut added = 0;
+    for e in entities {
+        if db.entity_exists_by_label(&e.entity_type, &e.label).map_err(|er| er.to_string())?.is_none() {
+            db.insert_entity(&e).map_err(|er| er.to_string())?;
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
+// ─── Export / Import (.ekuke zip) ─────────────────────
+#[tauri::command]
+pub async fn export_case(state: State<'_, crate::AppState>, case_id: String) -> Cmd<String> {
+    let cfg = require_config(&state).await?;
+    let root = cfg.cases_dir.join(&case_id);
+    if !root.join("case.json").exists() { return Err("Case not found".into()); }
+
+    let out_path = cfg.cases_dir.join(format!("{}.ekuke", case_id));
+    let file = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    zip.add_directory("data", options).map_err(|e| e.to_string())?;
+    let case_json = std::fs::read(root.join("case.json")).map_err(|e| e.to_string())?;
+    zip.start_file("case.json", options).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut zip, &case_json).map_err(|e| e.to_string())?;
+
+    let db_path = CasePaths::from_root(&root).db;
+    if db_path.exists() {
+        zip.start_file("data/ekuke.db", options).map_err(|e| e.to_string())?;
+        let db_bytes = std::fs::read(&db_path).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut zip, &db_bytes).map_err(|e| e.to_string())?;
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(out_path.display().to_string())
 }
 
 #[tauri::command]
-pub async fn run_plugin(_state: State<'_, AppState>, _plugin_name: String, _args: Value) -> Result<Value, String> {
-    Ok(json!({"status": "success"}))
+pub async fn import_case(state: State<'_, crate::AppState>, path: String) -> Cmd<Value> {
+    let cfg = require_config(&state).await?;
+    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    // read case.json first to get id
+    let mut case_json = String::new();
+    {
+        let mut f = archive.by_name("case.json").map_err(|e| e.to_string())?;
+        std::io::Read::read_to_string(&mut f, &mut case_json).map_err(|e| e.to_string())?;
+    }
+    let meta: CaseMetadata = serde_json::from_str(&case_json).map_err(|e| e.to_string())?;
+    let root = cfg.cases_dir.join(&meta.id);
+    std::fs::create_dir_all(root.join("data")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(root.join("attachments")).map_err(|e| e.to_string())?;
+    std::fs::write(root.join("case.json"), &case_json).map_err(|e| e.to_string())?;
+
+    if let Ok(mut f) = archive.by_name("data/ekuke.db") {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut bytes).map_err(|e| e.to_string())?;
+        std::fs::write(root.join("data").join("ekuke.db"), bytes).map_err(|e| e.to_string())?;
+    }
+
+    let paths = CasePaths::from_root(&root);
+    let db = GraphDb::new(&paths.db).map_err(|e| e.to_string())?;
+    *state.case_config.lock().await = Some(meta.clone());
+    *state.db.lock().await = Some(Arc::new(db));
+    *state.db_path.lock().await = Some(paths.db.clone());
+    Ok(json!({"id": meta.id, "name": meta.name}))
 }
 
-// ─── Export ───────────────────────────────────────────
+// ─── AI Assistant ─────────────────────────────────────
 #[tauri::command]
-pub async fn export_case(_state: State<'_, AppState>, _case_id: String, _format: String) -> Result<String, String> {
-    Ok("/path/to/exported/file".to_string())
+pub async fn ai_chat(
+    state: State<'_, crate::AppState>,
+    messages: Vec<ChatMessage>,
+) -> Cmd<Value> {
+    let cfg = require_config(&state).await?;
+    if !cfg.ai_enabled { return Err("AI assistant is disabled. Enable it in Settings.".into()); }
+    if cfg.ai_api_key.is_empty() && !cfg.ai_base_url.contains("localhost") && !cfg.ai_base_url.contains("127.0.0.1") {
+        return Err("No AI API key configured. Set one in Settings.".into());
+    }
+    let client = AiClient::new(cfg.ai_base_url.clone(), cfg.ai_api_key.clone(),
+        cfg.ai_model.clone(), cfg.ai_temperature);
+
+    let db = state.db.lock().await.clone();
+    let plugins_dir = cfg.plugins_dir.clone();
+    let reply = client.chat(&messages, db, Some(plugins_dir), cfg.api_keys.clone()).await
+        .map_err(|e| e.to_string())?;
+    Ok(json!({"reply": reply.0, "actions": reply.1}))
+}
+
+#[tauri::command]
+pub async fn ai_test_connection(state: State<'_, crate::AppState>) -> Cmd<String> {
+    let cfg = require_config(&state).await?;
+    let client = AiClient::new(cfg.ai_base_url.clone(), cfg.ai_api_key.clone(),
+        cfg.ai_model.clone(), cfg.ai_temperature);
+    client.test_connection().await.map_err(|e| e.to_string())
 }
 
 // ─── System ───────────────────────────────────────────
 #[tauri::command]
-pub async fn get_app_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
-}
+pub async fn health_check() -> String { "ok".to_string() }
 
 #[tauri::command]
-pub async fn get_system_info() -> Result<Value, String> {
-    Ok(json!({"os": std::env::consts::OS, "arch": std::env::consts::ARCH}))
-}
-
-#[tauri::command]
-pub async fn health_check() -> String {
-    "ok".to_string()
-}
-
-// ─── Init Plugin ──────────────────────────────────────
-pub fn init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    tauri::plugin::Builder::new("commands")
-        .invoke_handler(tauri::generate_handler![
-            get_config, set_config, set_db_path,
-            init_db, get_db_stats,
-            create_note, get_note, update_note, delete_note, list_notes,
-            initialize_search, search_notes, search_exact,
-            create_case, get_case, list_cases, update_case_status, delete_case,
-            create_entity, get_entity, list_entities, update_entity, delete_entity,
-            create_relation, get_relations, delete_relation,
-            add_tag, remove_tag,
-            encrypt_text, decrypt_text,
-            collect_files, get_collected_files,
-            load_plugin, list_plugins, run_plugin,
-            export_case,
-            get_app_version, get_system_info, health_check,
-        ])
-        .build()
-}
+pub async fn get_app_version() -> String { env!("CARGO_PKG_VERSION").to_string() }
