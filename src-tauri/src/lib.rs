@@ -8,13 +8,13 @@ pub mod db;
 pub mod entity;
 pub mod models;
 pub mod plugin;
+pub mod scrape; // <-- ADDED: scrape module declaration
 pub mod search;
 pub mod utils;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
 use case::CaseMetadata;
 use config::Config;
 use db::GraphDb;
@@ -67,6 +67,12 @@ pub fn run() {
             cmd::ai_test_connection,
             cmd::health_check,
             cmd::get_app_version,
+            // --- ADDED: New scrape commands ---
+            scrape::fetch_url,
+            scrape::scrape_and_import,
+            scrape::enrich_entity,
+            scrape::ai_summarize_case,
+            scrape::entity_neighborhood,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
