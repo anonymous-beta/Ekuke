@@ -67,8 +67,9 @@ impl GraphDb {
             entity_type: row.get(1)?,
             label: row.get(2)?,
             properties: serde_json::from_str(&props_str).unwrap_or_default(),
-            created_at: row.get::<_, String>(4)?.parse().unwrap_or_else(|| chrono::Utc::now()),
-            updated_at: row.get::<_, String>(5)?.parse().unwrap_or_else(|| chrono::Utc::now()),
+            // FIXED: unwrap_or_else expects a closure that takes the error argument
+            created_at: row.get::<_, String>(4)?.parse().unwrap_or_else(|_| chrono::Utc::now()),
+            updated_at: row.get::<_, String>(5)?.parse().unwrap_or_else(|_| chrono::Utc::now()),
         })
     }
 
@@ -83,7 +84,6 @@ impl GraphDb {
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&format!("SELECT {} FROM entities ORDER BY entity_type, label", Self::ENTITY_COLS))?;
-        // FIXED: Bind to local variable to drop temporaries before returning
         let res = stmt.query_map([], Self::row_to_entity)?.collect::<Result<Vec<_>, _>>()?;
         Ok(res)
     }
@@ -111,7 +111,6 @@ impl GraphDb {
     pub fn add_relationship(&self, rel: &Relationship) -> Result<()> {
         let conn = self.lock()?;
         let props = serde_json::to_string(&rel.properties)?;
-        // INSERT OR IGNORE: deterministic rel ids must not error on re-add
         conn.execute(
             "INSERT OR IGNORE INTO relationships (id, rel_type, source_id, target_id, properties, created_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -128,7 +127,8 @@ impl GraphDb {
             source_id: row.get(2)?,
             target_id: row.get(3)?,
             properties: serde_json::from_str(&props_str).unwrap_or_default(),
-            created_at: row.get::<_, String>(5)?.parse().unwrap_or_else(|| chrono::Utc::now()),
+            // FIXED: unwrap_or_else expects a closure that takes the error argument
+            created_at: row.get::<_, String>(5)?.parse().unwrap_or_else(|_| chrono::Utc::now()),
         })
     }
 
