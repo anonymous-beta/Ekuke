@@ -1,10 +1,9 @@
 [package]
 name = "ekuke"
-version = "0.1.0"
+version = "0.2.0"
 description = "EKUKE — Local-first OSINT investigation platform"
 authors = ["Anonymous-beta <chinedu>"]
 license = "MIT"
-repository = ""
 edition = "2021"
 
 [build-dependencies]
@@ -30,7 +29,9 @@ regex = "1"
 anyhow = "1"
 thiserror = "1"
 dirs = "5"
-reqwest = { version = "0.12", features = ["json"] }
+# FIX: TLS enabled — without this NO https request (AI, RDAP, crt.sh…) can work
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+md-5 = "0.10"
 tempfile = "3"
 bincode = "1"
 
