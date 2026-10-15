@@ -1,19 +1,29 @@
-const { invoke } = window.__TAURI__.core;
-const { open, save } = window.__TAURI__.dialog;
+/* EKUKE frontend v0.2.0 — hardened boot */
+const TAURI = window.__TAURI__;
+const statusMsg = document.getElementById('status-msg');
+function setStatus(text, isError) {
+    if (!statusMsg) return;
+    statusMsg.textContent = text;
+    statusMsg.style.color = isError ? '#ff6b6b' : '#7CFC98';
+}
+if (!TAURI || !TAURI.core) {
+    setStatus('FATAL: Tauri bridge missing — rebuild with "withGlobalTauri": true.', true);
+    throw new Error('Tauri bridge missing');
+}
+const { invoke } = TAURI.core;
+const { open } = TAURI.dialog || {};
 
 let cy = null;
 let currentCase = null;
 let aiHistory = [];
 
-const COLORS = {
-    Domain: '#3b82f6', Email: '#10b981', IPv4: '#f59e0b', Phone: '#8b5cf6',
-    Handle: '#ec4899', Person: '#ef4444', Organization: '#06b6d4',
-    URL: '#84cc16', Document: '#f97316', Other: '#6b7280', default: '#888888'
-};
-function getColor(type) { return COLORS[type] || COLORS.default; }
+const COLORS = { Domain:'#3b82f6', Email:'#10b981', IPv4:'#f59e0b', Phone:'#8b5cf6',
+    Handle:'#ec4899', Person:'#ef4444', Organization:'#06b6d4', URL:'#84cc16',
+    Document:'#f97316', Other:'#6b7280', default:'#888888' };
+const getColor = t => COLORS[t] || COLORS.default;
 
 async function init() {
-    const on = (id, fn) => document.getElementById(id).addEventListener('click', fn);
+    const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
     on('btn-new-case', showNewCaseModal);
     on('btn-open-case', showOpenCaseModal);
     on('btn-export-case', exportCase);
@@ -21,10 +31,13 @@ async function init() {
     on('btn-delete-case', deleteCurrentCase);
     on('btn-add-entity', showAddEntityModal);
     on('btn-extract', showExtractModal);
+    on('btn-scrape', showScrapeModal);
+    on('btn-export-png', exportPng);
     on('btn-settings', showSettings);
     on('btn-ai-chat', toggleAiPanel);
     on('btn-ai-close', toggleAiPanel);
     on('btn-ai-send', sendAiMessage);
+    on('btn-ai-summary', summarizeCase);
     on('btn-close-detail', closeDetail);
     on('modal-cancel', closeModal);
     on('settings-cancel', closeSettings);
@@ -35,67 +48,58 @@ async function init() {
         document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
         document.querySelectorAll('.tab-body').forEach(x => x.classList.add('hidden'));
         t.classList.add('active');
-        document.getElementById(t.dataset.tab).classList.remove('hidden');
+        const body = document.getElementById(t.dataset.tab);
+        if (body) body.classList.remove('hidden');
     }));
-    document.getElementById('ai-input').addEventListener('keydown', e => {
-        if (e.key === 'Enter') sendAiMessage();
-    });
-    document.getElementById('search-bar').addEventListener('input', debounce(handleSearch, 300));
+    const aiInput = document.getElementById('ai-input');
+    if (aiInput) aiInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendAiMessage(); });
+    const search = document.getElementById('search-bar');
+    if (search) search.addEventListener('input', debounce(handleSearch, 300));
 
-    initCytoscape();
-    await loadPlugins();
-    await loadConfig();
-    await checkOpenCase();
+    // Every boot step isolated — one failure can no longer kill the app
+    try { initCytoscape(); } catch (e) { setStatus('Graph engine failed to load (offline?): ' + e, true); }
+    try { await loadPlugins(); } catch (e) { console.error('plugins:', e); }
+    try { await loadConfig(); } catch (e) { setStatus('Config load failed: ' + e, true); }
+    try { await checkOpenCase(); } catch (e) { console.error('open case:', e); }
+    try {
+        const v = await invoke('get_app_version');
+        setStatus(`EKUKE v${v} · backend OK · ${new Date().toLocaleTimeString()}`);
+    } catch (e) { setStatus('Backend unreachable: ' + e, true); }
 }
 
 function initCytoscape() {
+    if (window.__cyFailed || typeof cytoscape === 'undefined') throw new Error('cytoscape CDN unavailable');
     cy = cytoscape({
         container: document.getElementById('graph-container'),
         style: [
-            { selector: 'node', style: {
-                'background-color': 'data(color)', 'label': 'data(label)',
+            { selector: 'node', style: { 'background-color': 'data(color)', 'label': 'data(label)',
                 'width': 40, 'height': 40, 'font-size': '10px', 'color': '#e0e0e0',
-                'text-valign': 'bottom', 'text-margin-y': 6,
-                'border-width': 2, 'border-color': '#333'
-            }},
-            { selector: 'edge', style: {
-                'width': 2, 'line-color': '#555', 'target-arrow-color': '#555',
-                'target-arrow-shape': 'triangle', 'curve-style': 'bezier',
-                'label': 'data(label)', 'font-size': '9px', 'color': '#888',
-                'text-rotation': 'autorotate'
-            }},
+                'text-valign': 'bottom', 'text-margin-y': 6, 'border-width': 2, 'border-color': '#333' }},
+            { selector: 'edge', style: { 'width': 2, 'line-color': '#555', 'target-arrow-color': '#555',
+                'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'label': 'data(label)',
+                'font-size': '9px', 'color': '#888', 'text-rotation': 'autorotate' }},
             { selector: 'node:selected', style: { 'border-color': '#ff3333', 'border-width': 3 } }
         ],
         layout: { name: 'cose', animate: false }
     });
     cy.on('tap', 'node', evt => showEntityDetail(evt.target.id()));
     cy.on('cxttap', 'node', evt => {
-        const id = evt.target.id();
         if (!confirm('Delete this entity?')) return;
-        invoke('delete_entity', { id }).then(loadGraph);
+        invoke('delete_entity', { id: evt.target.id() }).then(loadGraph).catch(e => alert(e));
     });
 }
 
 async function loadGraph() {
-    if (!currentCase) return;
-    const entities = await invoke('get_entities', {});
-    const rels = await invoke('get_relationships', {});
+    if (!currentCase || !cy) return;
+    const [entities, rels] = await Promise.all([
+        invoke('get_entities', {}), invoke('get_relationships', {})]);
     const nodeIds = new Set(entities.map(e => e.id));
     cy.elements().remove();
-    entities.forEach(e => {
-        cy.add({ group: 'nodes', data: {
-            id: e.id, label: e.label, color: getColor(e.entity_type),
-            type: e.entity_type
-        }});
-    });
-    rels.forEach(r => {
-        if (nodeIds.has(r.source_id) && nodeIds.has(r.target_id)) {
-            cy.add({ group: 'edges', data: {
-                id: r.id, source: r.source_id, target: r.target_id, label: r.rel_type
-            }});
-        }
-    });
+    entities.forEach(e => cy.add({ group: 'nodes', data: { id: e.id, label: e.label, color: getColor(e.entity_type), type: e.entity_type }}));
+    rels.forEach(r => { if (nodeIds.has(r.source_id) && nodeIds.has(r.target_id))
+        cy.add({ group: 'edges', data: { id: r.id, source: r.source_id, target: r.target_id, label: r.rel_type }}); });
     cy.layout({ name: 'cose', animate: false }).run();
+    setStatus(`Graph: ${entities.length} entities, ${rels.length} relationships`);
 }
 
 async function checkOpenCase() {
@@ -106,12 +110,10 @@ async function checkOpenCase() {
     }
 }
 
-// ─── Cases ────────────────────────────────────────────
+// ─── Cases ───
 function showNewCaseModal() {
-    showModal('New Case', `
-        <div class="detail-row"><label>Case Name</label>
-        <input type="text" id="case-name-input" placeholder="Investigation name"></div>
-    `, async () => {
+    showModal('New Case', `<div class="detail-row"><label>Case Name</label>
+        <input type="text" id="case-name-input" placeholder="Investigation name"></div>`, async () => {
         const name = document.getElementById('case-name-input').value.trim();
         if (!name) throw new Error('Name is required');
         currentCase = await invoke('create_case', { name });
@@ -119,43 +121,37 @@ function showNewCaseModal() {
         await loadGraph();
     });
 }
-
 async function showOpenCaseModal() {
     const cases = await invoke('list_cases');
     let html = '<div class="entity-list">';
     if (cases.length === 0) html += '<p class="muted">No cases found.</p>';
-    cases.forEach(c => {
-        html += `<div class="entity-list-item" data-id="${c.id}" data-name="${escapeHtml(c.name)}">
-            <span class="type-badge">${c.status}</span> ${escapeHtml(c.name)}</div>`;
-    });
+    cases.forEach(c => { html += `<div class="entity-list-item" data-id="${c.id}" data-name="${escapeHtml(c.name)}">
+        <span class="type-badge">${c.status}</span> ${escapeHtml(c.name)}</div>`; });
     html += '</div>';
     showModal('Open Case', html, async () => {});
     document.querySelectorAll('#modal .entity-list-item').forEach(item => {
         item.addEventListener('click', async () => {
             currentCase = await invoke('open_case', { caseId: item.dataset.id });
             document.getElementById('case-name').textContent = `Case: ${currentCase.name}`;
-            closeModal();
-            await loadGraph();
+            closeModal(); await loadGraph();
         });
     });
 }
-
 async function deleteCurrentCase() {
     if (!currentCase) return alert('No case open');
-    if (!confirm(`Delete case "${currentCase.name}" and ALL its data? This cannot be undone.`)) return;
+    if (!confirm(`Delete case "${currentCase.name}" and ALL its data?`)) return;
     await invoke('delete_case', { caseId: currentCase.id });
     currentCase = null;
     document.getElementById('case-name').textContent = '';
-    cy.elements().remove();
+    if (cy) cy.elements().remove();
 }
-
 async function exportCase() {
     if (!currentCase) return alert('No case open');
     const path = await invoke('export_case', { caseId: currentCase.id });
     alert(`Exported to:\n${path}`);
 }
-
 async function importCase() {
+    if (!open) return alert('File dialog unavailable');
     const path = await open({ filters: [{ name: 'Ekuke Case', extensions: ['ekuke'] }] });
     if (!path) return;
     currentCase = await invoke('import_case', { path });
@@ -164,18 +160,12 @@ async function importCase() {
     alert('Case imported');
 }
 
-// ─── Entities ─────────────────────────────────────────
+// ─── Entities ───
 function showAddEntityModal() {
     if (!currentCase) return alert('Open or create a case first');
-    showModal('Add Entity', `
-        <div class="detail-row"><label>Type</label>
-            <select id="new-entity-type">
-                ${['Domain','Email','IPv4','Phone','Handle','Person','Organization','URL','Document','Other']
-                    .map(t => `<option>${t}</option>`).join('')}
-            </select></div>
-        <div class="detail-row"><label>Label</label>
-            <input type="text" id="new-entity-label" placeholder="example.com"></div>
-    `, async () => {
+    showModal('Add Entity', `<div class="detail-row"><label>Type</label>
+        <select id="new-entity-type">${['Domain','Email','IPv4','Phone','Handle','Person','Organization','URL','Document','Other'].map(t => `<option>${t}</option>`).join('')}</select></div>
+        <div class="detail-row"><label>Label</label><input type="text" id="new-entity-label" placeholder="example.com"></div>`, async () => {
         const entity_type = document.getElementById('new-entity-type').value;
         const label = document.getElementById('new-entity-label').value.trim();
         if (!label) throw new Error('Label is required');
@@ -183,50 +173,63 @@ function showAddEntityModal() {
         await loadGraph();
     });
 }
-
 function showExtractModal() {
     if (!currentCase) return alert('Open or create a case first');
-    showModal('Extract Entities from Text', `
-        <div class="detail-row"><label>Paste text (emails, IPs, domains, phones, handles are auto-detected)</label>
-        <textarea id="extract-text" rows="8"></textarea></div>
-    `, async () => {
-        const text = document.getElementById('extract-text').value;
-        const added = await invoke('extract_entities_from_text', { text });
+    showModal('Extract Entities from Text', `<div class="detail-row"><label>Paste text</label>
+        <textarea id="extract-text" rows="8"></textarea></div>`, async () => {
+        const added = await invoke('extract_entities_from_text', { text: document.getElementById('extract-text').value });
         await loadGraph();
         alert(`Extracted ${added} new entities`);
     });
 }
+// NEW: web scraping
+function showScrapeModal() {
+    if (!currentCase) return alert('Open or create a case first');
+    showModal('🌐 Scrape URL into Case', `<div class="detail-row"><label>URL</label>
+        <input type="text" id="scrape-url" placeholder="https://example.com/page"></div>
+        <p class="muted">Fetches the page and imports emails, IPs, domains, phones, handles and outbound links as graph entities.</p>`, async () => {
+        const url = document.getElementById('scrape-url').value.trim();
+        if (!url) throw new Error('URL is required');
+        const res = await invoke('scrape_and_import', { url });
+        await loadGraph();
+        alert(`Scraped: ${res.final_url}\nHTTP ${res.status} · ${res.links_found} links\nTitle: ${res.title || '(none)'}\nEntities added: ${res.entities_added} · Relationships: ${res.relationships_added}`);
+    });
+}
+// NEW: graph PNG export
+function exportPng() {
+    if (!cy || cy.nodes().length === 0) return alert('Graph is empty');
+    const a = document.createElement('a');
+    a.href = cy.png({ full: true, scale: 2, bg: '#141414' });
+    a.download = `ekuke-${(currentCase ? currentCase.name : 'graph').replace(/\W+/g, '_')}-${Date.now()}.png`;
+    a.click();
+}
 
 async function showEntityDetail(id) {
     const entity = await invoke('get_entity_by_id', { id });
-    const panel = document.getElementById('detail-panel');
-    panel.classList.remove('hidden');
+    document.getElementById('detail-panel').classList.remove('hidden');
     let propsHtml = '';
     for (const [k, v] of Object.entries(entity.properties || {})) {
         propsHtml += `<div class="detail-row"><label>${escapeHtml(k)}</label>
-            <input type="text" value="${escapeHtml(typeof v === 'string' ? v : JSON.stringify(v))}"
-                data-prop="${escapeHtml(k)}"></div>`;
+            <input type="text" value="${escapeHtml(typeof v === 'string' ? v : JSON.stringify(v))}" data-prop="${escapeHtml(k)}"></div>`;
     }
     document.getElementById('detail-content').innerHTML = `
         <div class="detail-row"><label>ID</label><input type="text" value="${entity.id}" readonly></div>
         <div class="detail-row"><label>Type</label><input type="text" value="${escapeHtml(entity.entity_type)}" readonly></div>
         <div class="detail-row"><label>Label</label><input type="text" id="detail-label" value="${escapeHtml(entity.label)}"></div>
         ${propsHtml}
-        <div class="detail-row"><label>Link to (label)</label>
-            <input type="text" id="link-target" placeholder="other entity label">
+        <div class="detail-row"><label>Link to (label)</label><input type="text" id="link-target" placeholder="other entity label">
             <input type="text" id="link-type" placeholder="rel type e.g. resolves_to"></div>
         <div style="margin-top:16px;">
             <button class="btn primary" id="btn-update-entity">Update</button>
             <button class="btn" id="btn-create-link">Create Link</button>
-            <button class="btn danger" id="btn-delete-entity">Delete</button>
+            <button class="btn" id="btn-enrich-entity">⚡ Enrich</button>
             <button class="btn" id="btn-run-transform">Run Plugin</button>
+            <button class="btn danger" id="btn-delete-entity">Delete</button>
         </div>`;
     document.getElementById('btn-update-entity').addEventListener('click', async () => {
         const label = document.getElementById('detail-label').value;
         const properties = {};
-        document.querySelectorAll('#detail-content input[data-prop]').forEach(inp => {
-            properties[inp.dataset.prop] = inp.value;
-        });
+        document.querySelectorAll('#detail-content input[data-prop]').forEach(i => properties[i.dataset.prop] = i.value);
         await invoke('update_entity', { id: entity.id, label, properties });
         await loadGraph();
     });
@@ -235,92 +238,83 @@ async function showEntityDetail(id) {
         const relType = document.getElementById('link-type').value.trim() || 'linked_to';
         const matches = await invoke('search_entities', { query: targetLabel, limit: 1 });
         if (matches.length === 0) return alert('Target entity not found');
-        await invoke('create_relationship', {
-            sourceId: entity.id, targetId: matches[0].id, relType, properties: null
-        });
+        await invoke('create_relationship', { sourceId: entity.id, targetId: matches[0].id, relType, properties: null });
         await loadGraph();
     });
     document.getElementById('btn-delete-entity').addEventListener('click', async () => {
         if (!confirm('Delete this entity?')) return;
         await invoke('delete_entity', { id: entity.id });
-        closeDetail();
-        await loadGraph();
+        closeDetail(); await loadGraph();
     });
     document.getElementById('btn-run-transform').addEventListener('click', () => showTransformModal(entity));
+    // NEW: one-click enrichment
+    document.getElementById('btn-enrich-entity').addEventListener('click', async () => {
+        const btn = document.getElementById('btn-enrich-entity');
+        btn.disabled = true; btn.textContent = '⏳ Enriching…';
+        try {
+            const res = await invoke('enrich_entity', { id: entity.id });
+            await loadGraph(); await showEntityDetail(entity.id);
+            alert(`⚡ Enrichment complete\nProperties added: ${res.properties_added}\nEntities created: ${res.entities_created}\nRelationships: ${res.relationships_created}\n\n${res.notes.join('\n')}`);
+        } catch (e) { alert('Enrichment failed: ' + e); }
+        finally { btn.disabled = false; btn.textContent = '⚡ Enrich'; }
+    });
 }
 
 async function showTransformModal(entity) {
     const plugins = await invoke('get_plugins');
-    const compatible = plugins.filter(p =>
-        (p.input_types || []).includes(entity.entity_type) || (p.input_types || []).includes('*'));
-    if (compatible.length === 0) return alert('No compatible plugins installed');
+    const compatible = plugins.filter(p => (p.input_types || []).includes(entity.entity_type) || (p.input_types || []).includes('*'));
+    if (compatible.length === 0) return alert('No compatible plugins installed (use ⚡ Enrich for built-in enrichment)');
     let html = '<div class="detail-row"><label>Select Plugin</label><select id="transform-plugin">';
-    compatible.forEach(p => {
-        html += `<option value="${p.id}">${escapeHtml(p.name)} — ${escapeHtml(p.description)}</option>`;
-    });
+    compatible.forEach(p => { html += `<option value="${p.id}">${escapeHtml(p.name)} — ${escapeHtml(p.description)}</option>`; });
     html += '</select></div><div id="plugin-config"></div>';
     showModal('Run Plugin', html, async () => {
         const pluginId = document.getElementById('transform-plugin').value;
         const config = {};
-        document.querySelectorAll('#plugin-config input').forEach(inp => {
-            if (inp.dataset.name) config[inp.dataset.name] = inp.value;
-        });
+        document.querySelectorAll('#plugin-config input').forEach(i => { if (i.dataset.name) config[i.dataset.name] = i.value; });
         try {
             const result = await invoke('run_transform', { pluginId, entityId: entity.id, config });
-            await loadGraph();
-            closeModal();
+            await loadGraph(); closeModal();
             alert(`Done: ${result.entities} entities, ${result.relationships} relationships added`);
-        } catch (e) {
-            alert('Plugin failed: ' + e);
-        }
+        } catch (e) { alert('Plugin failed: ' + e); }
     });
     const updateConfig = () => {
-        const pid = document.getElementById('transform-plugin').value;
-        const plugin = compatible.find(p => p.id === pid);
+        const plugin = compatible.find(p => p.id === document.getElementById('transform-plugin').value);
         const container = document.getElementById('plugin-config');
         container.innerHTML = '';
         (plugin?.config_fields || []).forEach(f => {
-            container.innerHTML += `<div class="detail-row">
-                <label>${escapeHtml(f.name)}${f.required ? ' *' : ''}</label>
-                <input type="text" data-name="${escapeHtml(f.name)}" value="${escapeHtml(f.default || '')}"
-                    placeholder="${escapeHtml(f.description || '')}"></div>`;
+            container.innerHTML += `<div class="detail-row"><label>${escapeHtml(f.name)}${f.required ? ' *' : ''}</label>
+                <input type="text" data-name="${escapeHtml(f.name)}" value="${escapeHtml(f.default || '')}" placeholder="${escapeHtml(f.description || '')}"></div>`;
         });
     };
     document.getElementById('transform-plugin').addEventListener('change', updateConfig);
     updateConfig();
 }
 
-// ─── Search ───────────────────────────────────────────
+// ─── Search ───
 async function handleSearch(e) {
     const query = e.target.value.trim();
-    if (!query || !currentCase || !cy) return;
-    if (!query) { cy.nodes().style('opacity', 1); return; }
+    if (!query || !currentCase || !cy) { if (cy) cy.nodes().style('opacity', 1); return; }
     const results = await invoke('search_entities', { query, limit: 20 });
     const ids = results.map(r => r.id);
     cy.nodes().forEach(n => n.style('opacity', ids.includes(n.id()) ? 1 : 0.15));
 }
 
-// ─── Plugins list ─────────────────────────────────────
+// ─── Plugins ───
 async function loadPlugins() {
-    try {
-        const plugins = await invoke('get_plugins');
-        const container = document.getElementById('plugin-list');
-        container.innerHTML = plugins.length ? '' : '<p class="muted">No plugins found in plugins dir.</p>';
-        plugins.forEach(p => {
-            const div = document.createElement('div');
-            div.className = 'plugin-item';
-            div.innerHTML = `<div class="name">${escapeHtml(p.name)}</div>
-                <div class="desc">${escapeHtml(p.description || '')}</div>`;
-            container.appendChild(div);
-        });
-    } catch (e) { console.error('Failed to load plugins:', e); }
+    const plugins = await invoke('get_plugins');
+    const container = document.getElementById('plugin-list');
+    container.innerHTML = plugins.length ? '' : '<p class="muted">No external plugins. Built-in ⚡ Enrich works out of the box.</p>';
+    plugins.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'plugin-item';
+        div.innerHTML = `<div class="name">${escapeHtml(p.name)}</div><div class="desc">${escapeHtml(p.description || '')}</div>`;
+        container.appendChild(div);
+    });
 }
 
-// ─── Settings ─────────────────────────────────────────
+// ─── Settings ───
 let settingsConfig = null;
-async function loadConfig() {
-    settingsConfig = await invoke('get_config');
-}
+async function loadConfig() { settingsConfig = await invoke('get_config'); }
 async function showSettings() {
     await loadConfig();
     const c = settingsConfig;
@@ -334,9 +328,7 @@ async function showSettings() {
     document.getElementById('set-key-shodan').value = (c.api_keys && c.api_keys.shodan) || '';
     document.getElementById('settings-overlay').classList.remove('hidden');
 }
-function closeSettings() {
-    document.getElementById('settings-overlay').classList.add('hidden');
-}
+const closeSettings = () => document.getElementById('settings-overlay').classList.add('hidden');
 async function saveSettings() {
     const c = settingsConfig;
     c.ai_enabled = document.getElementById('set-ai-enabled').value === 'true';
@@ -350,8 +342,7 @@ async function saveSettings() {
     c.api_keys = c.api_keys || {};
     if (shodan) c.api_keys.shodan = shodan;
     await invoke('set_config', { config: c });
-    closeSettings();
-    await loadPlugins();
+    closeSettings(); await loadPlugins();
     appendAiMessage('system', 'Settings saved.');
 }
 async function saveExtraKey() {
@@ -366,7 +357,6 @@ async function saveExtraKey() {
     alert(`Key "${name}" saved`);
 }
 async function testAiConnection() {
-    // save current AI fields first so the test uses them
     settingsConfig.ai_enabled = true;
     settingsConfig.ai_base_url = document.getElementById('set-ai-url').value.trim() || 'https://api.openai.com/v1';
     settingsConfig.ai_api_key = document.getElementById('set-ai-key').value.trim();
@@ -374,18 +364,12 @@ async function testAiConnection() {
     await invoke('set_config', { config: settingsConfig });
     const el = document.getElementById('ai-test-result');
     el.textContent = 'Testing...';
-    try {
-        const msg = await invoke('ai_test_connection');
-        el.textContent = '✔ ' + msg;
-    } catch (e) {
-        el.textContent = '✘ ' + e;
-    }
+    try { el.textContent = '✔ ' + await invoke('ai_test_connection'); }
+    catch (e) { el.textContent = '✘ ' + e; }
 }
 
-// ─── AI chat ──────────────────────────────────────────
-function toggleAiPanel() {
-    document.getElementById('ai-panel').classList.toggle('hidden');
-}
+// ─── AI chat ───
+const toggleAiPanel = () => document.getElementById('ai-panel').classList.toggle('hidden');
 function appendAiMessage(role, text) {
     const box = document.getElementById('ai-messages');
     const div = document.createElement('div');
@@ -394,32 +378,40 @@ function appendAiMessage(role, text) {
     box.appendChild(div);
     box.scrollTop = box.scrollHeight;
 }
+const dropThinking = () => { const b = document.getElementById('ai-messages'); if (b.lastChild) b.lastChild.remove(); };
 async function sendAiMessage() {
     const input = document.getElementById('ai-input');
     const text = input.value.trim();
     if (!text) return;
-    if (!currentCase) { appendAiMessage('system', '⚠ Open or create a case first so the AI has data to work on.'); return; }
+    if (!currentCase) { appendAiMessage('system', '⚠ Open or create a case first.'); return; }
     input.value = '';
     appendAiMessage('user', text);
     aiHistory.push({ role: 'user', content: text });
     appendAiMessage('system', '…thinking');
     try {
         const result = await invoke('ai_chat', { messages: aiHistory });
-        document.getElementById('ai-messages').lastChild.remove(); // remove thinking
+        dropThinking();
         appendAiMessage('assistant', result.reply || '(empty reply)');
         aiHistory.push({ role: 'assistant', content: result.reply || '' });
         if (result.actions && result.actions.length > 0) {
-            appendAiMessage('system', `🔧 Performed ${result.actions.length} action(s): ` +
-                result.actions.map(a => a.tool).join(', '));
+            appendAiMessage('system', `🔧 ${result.actions.length} action(s): ` + result.actions.map(a => a.tool).join(', '));
             await loadGraph();
         }
-    } catch (e) {
-        document.getElementById('ai-messages').lastChild.remove();
-        appendAiMessage('system', 'Error: ' + e);
-    }
+    } catch (e) { dropThinking(); appendAiMessage('system', 'Error: ' + e); }
+}
+// NEW: one-click AI case summary
+async function summarizeCase() {
+    if (!currentCase) return appendAiMessage('system', '⚠ Open a case first.');
+    appendAiMessage('user', '📋 Summarize this case');
+    appendAiMessage('system', '…analyzing case graph');
+    try {
+        const reply = await invoke('ai_summarize_case');
+        dropThinking();
+        appendAiMessage('assistant', reply);
+    } catch (e) { dropThinking(); appendAiMessage('system', 'Error: ' + e); }
 }
 
-// ─── Modal helpers ────────────────────────────────────
+// ─── Modal helpers ───
 function showModal(title, bodyHtml, onConfirm) {
     document.getElementById('modal-title').textContent = title;
     document.getElementById('modal-body').innerHTML = bodyHtml;
@@ -431,17 +423,13 @@ function showModal(title, bodyHtml, onConfirm) {
         try { await onConfirm(); } catch (e) { alert('Error: ' + e); }
     });
 }
-function closeModal() { document.getElementById('modal-overlay').classList.add('hidden'); }
-function closeDetail() { document.getElementById('detail-panel').classList.add('hidden'); }
-
-function debounce(fn, ms) {
-    let timeout;
-    return (...args) => { clearTimeout(timeout); timeout = setTimeout(() => fn(...args), ms); };
-}
+const closeModal = () => document.getElementById('modal-overlay').classList.add('hidden');
+const closeDetail = () => document.getElementById('detail-panel').classList.add('hidden');
+const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text == null ? '' : String(text);
     return div.innerHTML;
 }
 
-init();
+init().catch(e => setStatus('Init failed: ' + e, true));
