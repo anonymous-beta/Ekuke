@@ -1,46 +1,45 @@
 name: Build Windows
-
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-
+  workflow_dispatch:
+env:
+  CARGO_TERM_COLOR: always
 jobs:
   build-windows:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-all-crates: "true"
       - name: Install WebView2 Runtime
         run: |
           Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/p/?LinkId=2124703 -OutFile MicrosoftEdgeWebview2Setup.exe
           Start-Process -FilePath MicrosoftEdgeWebview2Setup.exe -ArgumentList "/silent /install" -Wait
-
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0"
-
       - name: Build Tauri app
         working-directory: ./src-tauri
         run: cargo tauri build
-
       - name: Upload NSIS installer (.exe)
         uses: actions/upload-artifact@v4
         with:
           name: ekuke-windows-setup
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn
-
+          retention-days: 30
       - name: Upload portable executable
         uses: actions/upload-artifact@v4
         with:
           name: ekuke-portable
           path: src-tauri/target/release/ekuke.exe
           if-no-files-found: warn
+          retention-days: 30
