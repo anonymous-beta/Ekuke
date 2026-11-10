@@ -1,1201 +1,1484 @@
-/* EKUKE frontend v0.2.1 — reliable graph linking */
-const TAURI = window.TAURI;
-const statusMsg = document.getElementById('status-msg');
+Path: "frontend/app.js"
 
-function setStatus(text, isError = false) {
-if (!statusMsg) return;
-statusMsg.textContent = text;
-statusMsg.style.color = isError ? '#ff6b6b' : '#7CFC98';
-}
+/* =========================================================
+   EKUKE — Investigation Frontend
+   Creator: Anonymous-beta
+   Version: 0.3.0
+   Architecture: Tauri 2 + SQLite + Cytoscape
+========================================================= */
 
-if (!TAURI || !TAURI.core) {
-setStatus('FATAL: Tauri bridge missing — rebuild with "withGlobalTauri": true.', true);
-throw new Error('Tauri bridge missing');
-}
-
-const { invoke } = TAURI.core;
-const { open } = TAURI.dialog || {};
+const TAURI = window.__TAURI__;
+const invoke = TAURI?.core?.invoke;
 
 let cy = null;
 let currentCase = null;
+let activeEntity = null;
 let aiHistory = [];
-let activeEntityId = null;
+let settingsConfig = null;
+let graphLoading = false;
 let linkSearchTimer = null;
+let searchTimer = null;
+
+const $ = id => document.getElementById(id);
 
 const COLORS = {
-Domain: '#3b82f6',
-Email: '#10b981',
-IPv4: '#f59e0b',
-Phone: '#8b5cf6',
-Handle: '#ec4899',
-Person: '#ef4444',
-Organization: '#06b6d4',
-URL: '#84cc16',
-Document: '#f97316',
-Other: '#6b7280',
-default: '#888888'
+    Domain: "#3b82f6",
+    Email: "#10b981",
+    IPv4: "#f59e0b",
+    Phone: "#8b5cf6",
+    Handle: "#ec4899",
+    Person: "#ef4444",
+    Organization: "#06b6d4",
+    URL: "#84cc16",
+    Document: "#f97316",
+    Other: "#8b929a"
 };
 
-const getColor = t => COLORS[t] || COLORS.default;
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, c => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+    })[c]);
+}
+
+function setStatus(message, error = false) {
+    const el = $("status-msg");
+    if (!el) return;
+
+    el.textContent = message;
+    el.style.color = error ? "#ff7777" : "#9bdc91";
+}
+
+function requireCase() {
+    if (!currentCase) {
+        throw new Error("Create or open an investigation case first.");
+    }
+}
+
+async function safeInvoke(command, args = {}) {
+    if (typeof invoke !== "function") {
+        throw new Error("Tauri backend is unavailable.");
+    }
+
+    return invoke(command, args);
+}
+
+function showError(error) {
+    const message = error?.message || String(error);
+    console.error(error);
+    setStatus(message, true);
+    alert(message);
+}
+
+function setBusy(button, busy, label) {
+    if (!button) return;
+
+    button.disabled = busy;
+
+    if (label) {
+        if (busy) {
+            button.dataset.originalText = button.textContent;
+            button.textContent = label;
+        } else {
+            button.textContent =
+                button.dataset.originalText || button.textContent;
+        }
+    }
+}
+
+/* =========================================================
+   INITIALIZATION
+========================================================= */
 
 async function init() {
-const on = (id, fn) => {
-const el = document.getElementById(id);
-if (el) el.addEventListener('click', fn);
-};
-
-on('btn-new-case', showNewCaseModal);
-on('btn-open-case', showOpenCaseModal);
-on('btn-export-case', exportCase);
-on('btn-import-case', importCase);
-on('btn-delete-case', deleteCurrentCase);
-on('btn-add-entity', showAddEntityModal);
-on('btn-extract', showExtractModal);
-on('btn-scrape', showScrapeModal);
-on('btn-export-png', exportPng);
-on('btn-settings', showSettings);
-on('btn-ai-chat', toggleAiPanel);
-on('btn-ai-close', toggleAiPanel);
-on('btn-ai-send', sendAiMessage);
-on('btn-ai-summary', summarizeCase);
-on('btn-close-detail', closeDetail);
-on('modal-cancel', closeModal);
-on('settings-cancel', closeSettings);
-on('settings-save', saveSettings);
-on('btn-ai-test', testAiConnection);
-on('btn-add-key', saveExtraKey);
-
-document.querySelectorAll('.tab').forEach(t => {
-    t.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-        document.querySelectorAll('.tab-body').forEach(x => x.classList.add('hidden'));
-
-        t.classList.add('active');
-
-        const body = document.getElementById(t.dataset.tab);
-        if (body) body.classList.remove('hidden');
-    });
-});
-
-const aiInput = document.getElementById('ai-input');
-if (aiInput) {
-    aiInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') sendAiMessage();
-    });
-}
-
-const search = document.getElementById('search-bar');
-if (search) {
-    search.addEventListener('input', debounce(handleSearch, 300));
-}
-
-try {
-    initCytoscape();
-} catch (e) {
-    setStatus('Graph engine failed to load: ' + e, true);
-}
-
-try {
-    await loadPlugins();
-} catch (e) {
-    console.error('plugins:', e);
-}
-
-try {
-    await loadConfig();
-} catch (e) {
-    setStatus('Config load failed: ' + e, true);
-}
-
-try {
-    await checkOpenCase();
-} catch (e) {
-    console.error('open case:', e);
-}
-
-try {
-    const v = await invoke('get_app_version');
-    setStatus(`EKUKE v${v} · backend OK · ${new Date().toLocaleTimeString()}`);
-} catch (e) {
-    setStatus('Backend unreachable: ' + e, true);
-}
-
-}
-
-function initCytoscape() {
-if (window.__cyFailed || typeof cytoscape === 'undefined') {
-throw new Error('cytoscape CDN unavailable');
-}
-
-cy = cytoscape({
-    container: document.getElementById('graph-container'),
-
-    style: [
-        {
-            selector: 'node',
-            style: {
-                'background-color': 'data(color)',
-                'label': 'data(label)',
-                'width': 40,
-                'height': 40,
-                'font-size': '10px',
-                'color': '#e0e0e0',
-                'text-valign': 'bottom',
-                'text-margin-y': 6,
-                'border-width': 2,
-                'border-color': '#333'
-            }
-        },
-        {
-            selector: 'edge',
-            style: {
-                'width': 2,
-                'line-color': '#555',
-                'target-arrow-color': '#555',
-                'target-arrow-shape': 'triangle',
-                'curve-style': 'bezier',
-                'label': 'data(label)',
-                'font-size': '9px',
-                'color': '#888',
-                'text-rotation': 'autorotate'
-            }
-        },
-        {
-            selector: 'node:selected',
-            style: {
-                'border-color': '#ff3333',
-                'border-width': 3
-            }
-        },
-        {
-            selector: 'edge:selected',
-            style: {
-                'line-color': '#f59e0b',
-                'target-arrow-color': '#f59e0b',
-                'width': 4
-            }
-        }
-    ],
-
-    layout: {
-        name: 'cose',
-        animate: false
-    }
-});
-
-cy.on('tap', 'node', evt => {
-    showEntityDetail(evt.target.id());
-});
-
-cy.on('cxttap', 'node', evt => {
-    if (!confirm('Delete this entity?')) return;
-
-    invoke('delete_entity', { id: evt.target.id() })
-        .then(loadGraph)
-        .catch(e => alert(e));
-});
-
-}
-
-async function loadGraph() {
-if (!currentCase || !cy) return;
-
-const [entities, rels] = await Promise.all([
-    invoke('get_entities', {}),
-    invoke('get_relationships', {})
-]);
-
-const nodeIds = new Set(entities.map(e => e.id));
-
-cy.elements().remove();
-
-entities.forEach(e => {
-    cy.add({
-        group: 'nodes',
-        data: {
-            id: e.id,
-            label: e.label,
-            color: getColor(e.entity_type),
-            type: e.entity_type
-        }
-    });
-});
-
-rels.forEach(r => {
-    if (nodeIds.has(r.source_id) && nodeIds.has(r.target_id)) {
-        cy.add({
-            group: 'edges',
-            data: {
-                id: r.id,
-                source: r.source_id,
-                target: r.target_id,
-                label: r.rel_type,
-                rel_type: r.rel_type
-            }
-        });
-    }
-});
-
-cy.layout({
-    name: 'cose',
-    animate: false
-}).run();
-
-setStatus(`Graph: ${entities.length} entities, ${rels.length} relationships`);
-
-}
-
-async function checkOpenCase() {
-currentCase = await invoke('get_current_case');
-
-if (currentCase) {
-    document.getElementById('case-name').textContent =
-        `Case: ${currentCase.name}`;
-
-    await loadGraph();
-}
-
-}
-
-/* CASE MANAGEMENT */
-
-function showNewCaseModal() {
-showModal(
-'New Case',
-"<div class="detail-row"> <label>Case Name</label> <input type="text" id="case-name-input" placeholder="Investigation name"> </div>",
-async () => {
-const name = document.getElementById('case-name-input').value.trim();
-
-        if (!name) throw new Error('Name is required');
-
-        currentCase = await invoke('create_case', { name });
-
-        document.getElementById('case-name').textContent =
-            `Case: ${currentCase.name}`;
-
-        await loadGraph();
-        closeModal();
-    }
-);
-
-}
-
-async function showOpenCaseModal() {
-const cases = await invoke('list_cases');
-
-let html = '<div class="entity-list">';
-
-if (cases.length === 0) {
-    html += '<p class="muted">No cases found.</p>';
-}
-
-cases.forEach(c => {
-    html += `
-        <div class="entity-list-item"
-             data-id="${escapeHtml(c.id)}">
-            <span class="type-badge">${escapeHtml(c.status)}</span>
-            ${escapeHtml(c.name)}
-        </div>`;
-});
-
-html += '</div>';
-
-showModal('Open Case', html, async () => {});
-
-document.querySelectorAll('#modal .entity-list-item').forEach(item => {
-    item.addEventListener('click', async () => {
-        currentCase = await invoke('open_case', {
-            caseId: item.dataset.id
-        });
-
-        document.getElementById('case-name').textContent =
-            `Case: ${currentCase.name}`;
-
-        closeModal();
-        await loadGraph();
-    });
-});
-
-}
-
-async function deleteCurrentCase() {
-if (!currentCase) return alert('No case open');
-
-if (!confirm(`Delete case "${currentCase.name}" and ALL its data?`)) {
-    return;
-}
-
-await invoke('delete_case', {
-    caseId: currentCase.id
-});
-
-currentCase = null;
-
-document.getElementById('case-name').textContent = '';
-
-if (cy) cy.elements().remove();
-
-}
-
-async function exportCase() {
-if (!currentCase) return alert('No case open');
-
-const path = await invoke('export_case', {
-    caseId: currentCase.id
-});
-
-alert(`Exported to:\n${path}`);
-
-}
-
-async function importCase() {
-if (!open) return alert('File dialog unavailable');
-
-const path = await open({
-    filters: [{ name: 'Ekuke Case', extensions: ['ekuke'] }]
-});
-
-if (!path) return;
-
-currentCase = await invoke('import_case', { path });
-
-document.getElementById('case-name').textContent =
-    `Case: ${currentCase.name}`;
-
-await loadGraph();
-alert('Case imported');
-
-}
-
-/* ENTITY MANAGEMENT */
-
-function showAddEntityModal() {
-if (!currentCase) return alert('Open or create a case first');
-
-showModal(
-    'Add Entity',
-    `<div class="detail-row">
-        <label>Type</label>
-        <select id="new-entity-type">
-            ${[
-                'Domain', 'Email', 'IPv4', 'Phone', 'Handle',
-                'Person', 'Organization', 'URL', 'Document', 'Other'
-            ].map(t => `<option>${t}</option>`).join('')}
-        </select>
-    </div>
-    <div class="detail-row">
-        <label>Label</label>
-        <input type="text" id="new-entity-label" placeholder="example.com">
-    </div>`,
-    async () => {
-        const entity_type =
-            document.getElementById('new-entity-type').value;
-
-        const label =
-            document.getElementById('new-entity-label').value.trim();
-
-        if (!label) throw new Error('Label is required');
-
-        await invoke('create_entity', {
-            entityType: entity_type,
-            label,
-            properties: null
-        });
-
-        await loadGraph();
-        closeModal();
-    }
-);
-
-}
-
-function showExtractModal() {
-if (!currentCase) return alert('Open or create a case first');
-
-showModal(
-    'Extract Entities from Text',
-    `<div class="detail-row">
-        <label>Paste text</label>
-        <textarea id="extract-text" rows="8"></textarea>
-    </div>`,
-    async () => {
-        const added = await invoke('extract_entities_from_text', {
-            text: document.getElementById('extract-text').value
-        });
-
-        await loadGraph();
-        closeModal();
-
-        alert(`Extracted ${added} new entities`);
-    }
-);
-
-}
-
-function showScrapeModal() {
-if (!currentCase) return alert('Open or create a case first');
-
-showModal(
-    '🌐 Scrape URL into Case',
-    `<div class="detail-row">
-        <label>URL</label>
-        <input type="text" id="scrape-url"
-            placeholder="https://example.com/page">
-    </div>
-    <p class="muted">
-        Fetches a page and imports discovered public entities and links.
-    </p>`,
-    async () => {
-        const url =
-            document.getElementById('scrape-url').value.trim();
-
-        if (!url) throw new Error('URL is required');
-
-        const res = await invoke('scrape_and_import', { url });
-
-        await loadGraph();
-        closeModal();
-
-        alert(
-            `Scraped: ${res.final_url}\n` +
-            `HTTP ${res.status} · ${res.links_found} links\n` +
-            `Title: ${res.title || '(none)'}\n` +
-            `Entities added: ${res.entities_added} · ` +
-            `Relationships: ${res.relationships_added}`
-        );
-    }
-);
-
-}
-
-function exportPng() {
-if (!cy || cy.nodes().length === 0) {
-return alert('Graph is empty');
-}
-
-const a = document.createElement('a');
-
-a.href = cy.png({
-    full: true,
-    scale: 2,
-    bg: '#141414'
-});
-
-a.download =
-    `ekuke-${(currentCase ? currentCase.name : 'graph')
-        .replace(/\W+/g, '_')}-${Date.now()}.png`;
-
-a.click();
-
-}
-
-/*
-
-* GRAPH LINKING
-* 
-* The previous implementation searched for a label and automatically
-* selected the first result. That could connect the wrong entities.
-* 
-* This version:
-* - Displays actual matching entities.
-* - Uses the selected entity's exact ID.
-* - Prevents linking an entity to itself.
-* - Preserves directed source -> target relationships.
-* - Refreshes the graph after linking.
-* - Reports backend errors rather than silently ignoring them.
-    */
-
-async function searchLinkTargets(sourceEntity, query) {
-const resultsBox = document.getElementById('link-results');
-
-if (!resultsBox) return;
-
-const q = query.trim();
-
-if (q.length < 2) {
-    resultsBox.innerHTML =
-        '<p class="muted">Enter at least two characters to search.</p>';
-    return;
-}
-
-resultsBox.innerHTML = '<p class="muted">Searching entities...</p>';
-
-try {
-    const matches = await invoke('search_entities', {
-        query: q,
-        limit: 50
-    });
-
-    const usable = matches.filter(e =>
-        e.id !== sourceEntity.id
-    );
-
-    if (usable.length === 0) {
-        resultsBox.innerHTML =
-            '<p class="muted">No other matching entities found.</p>';
+    if (typeof invoke !== "function") {
+        setStatus("Tauri bridge unavailable. Rebuild the desktop application.", true);
         return;
     }
 
-    resultsBox.innerHTML = '';
+    bindMainButtons();
+    bindSettingsTabs();
+    bindKeyboardShortcuts();
+    initializeGraph();
 
-    usable.forEach(e => {
-        const button = document.createElement('button');
+    try {
+        await loadConfig();
+    } catch (e) {
+        console.error("Configuration:", e);
+    }
 
-        button.type = 'button';
-        button.className = 'btn link-result';
+    try {
+        await loadPlugins();
+    } catch (e) {
+        console.error("Plugins:", e);
+    }
 
-        button.style.display = 'block';
-        button.style.width = '100%';
-        button.style.textAlign = 'left';
-        button.style.marginBottom = '7px';
+    try {
+        currentCase = await safeInvoke("get_current_case");
 
-        button.textContent =
-            `${e.entity_type} · ${e.label} · ${e.id.slice(0, 8)}`;
+        if (currentCase) {
+            updateCaseLabel();
+            await loadGraph();
+        }
+    } catch (e) {
+        console.error("Case initialization:", e);
+    }
 
-        button.addEventListener('click', async () => {
-            const relType =
-                document.getElementById('link-type').value.trim();
-
-            if (!relType) {
-                return alert('Enter a relationship type first.');
-            }
-
-            if (e.id === sourceEntity.id) {
-                return alert('An entity cannot link to itself.');
-            }
-
-            button.disabled = true;
-            button.textContent = 'Creating relationship...';
-
-            try {
-                await invoke('create_relationship', {
-                    sourceId: sourceEntity.id,
-                    targetId: e.id,
-                    relType,
-                    properties: null
-                });
-
-                await loadGraph();
-                await showEntityDetail(sourceEntity.id);
-
-                setStatus(
-                    `Linked ${sourceEntity.label} → ${e.label} (${relType})`
-                );
-            } catch (error) {
-                button.disabled = false;
-                button.textContent =
-                    `${e.entity_type} · ${e.label} · ${e.id.slice(0, 8)}`;
-
-                alert('Could not create relationship: ' + error);
-            }
-        });
-
-        resultsBox.appendChild(button);
-    });
-} catch (error) {
-    resultsBox.innerHTML =
-        `<p class="muted">Search failed: ${escapeHtml(error)}</p>`;
+    try {
+        const version = await safeInvoke("get_app_version");
+        setStatus(`EKUKE ${version} · Backend connected`);
+    } catch (e) {
+        setStatus("Backend connection failed: " + e, true);
+    }
 }
 
+function bindMainButtons() {
+    const bindings = {
+        "btn-new-case": showNewCaseModal,
+        "btn-open-case": showOpenCaseModal,
+        "btn-export-case": exportCase,
+        "btn-import-case": importCase,
+        "btn-delete-case": deleteCurrentCase,
+        "btn-add-entity": showAddEntityModal,
+        "btn-extract": showExtractModal,
+        "btn-scrape": showScrapeModal,
+        "btn-export-png": exportPng,
+        "btn-settings": showSettings,
+        "btn-ai-chat": toggleAiPanel,
+        "btn-ai-close": toggleAiPanel,
+        "btn-ai-send": sendAiMessage,
+        "btn-ai-summary": summarizeCase,
+        "btn-close-detail": closeDetail,
+        "modal-cancel": closeModal,
+        "settings-cancel": closeSettings,
+        "settings-save": saveSettings,
+        "btn-ai-test": testAiConnection,
+        "btn-add-key": saveExtraKey
+    };
+
+    for (const [id, handler] of Object.entries(bindings)) {
+        $(id)?.addEventListener("click", () => {
+            Promise.resolve(handler()).catch(showError);
+        });
+    }
+
+    $("ai-input")?.addEventListener("keydown", e => {
+        if (e.key === "Enter") sendAiMessage().catch(showError);
+    });
+
+    $("search-bar")?.addEventListener("input", e => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(
+            () => handleSearch(e.target.value).catch(showError),
+            250
+        );
+    });
+
+    $("modal-overlay")?.addEventListener("click", e => {
+        if (e.target.id === "modal-overlay") closeModal();
+    });
+
+    $("settings-overlay")?.addEventListener("click", e => {
+        if (e.target.id === "settings-overlay") closeSettings();
+    });
+}
+
+function bindSettingsTabs() {
+    document.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+            document.querySelectorAll(".tab").forEach(t =>
+                t.classList.remove("active")
+            );
+
+            document.querySelectorAll(".tab-body").forEach(body =>
+                body.classList.add("hidden")
+            );
+
+            tab.classList.add("active");
+            $(tab.dataset.tab)?.classList.remove("hidden");
+        });
+    });
+}
+
+function bindKeyboardShortcuts() {
+    document.addEventListener("keydown", e => {
+        if (e.key === "Escape") {
+            closeModal();
+            closeSettings();
+        }
+
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+            e.preventDefault();
+            $("search-bar")?.focus();
+        }
+    });
+}
+
+/* =========================================================
+   GRAPH ENGINE
+========================================================= */
+
+function initializeGraph() {
+    if (window.__cyFailed || typeof window.cytoscape !== "function") {
+        setStatus("Cytoscape could not load. Check the graph library.", true);
+        return;
+    }
+
+    cy = window.cytoscape({
+        container: $("graph-container"),
+
+        style: [
+            {
+                selector: "node",
+                style: {
+                    "background-color": "data(color)",
+                    "label": "data(label)",
+                    "color": "#e4e7e9",
+                    "font-size": 11,
+                    "text-valign": "bottom",
+                    "text-margin-y": 7,
+                    "text-outline-width": 2,
+                    "text-outline-color": "#101316",
+                    "width": 44,
+                    "height": 44,
+                    "border-width": 2,
+                    "border-color": "#59636b"
+                }
+            },
+            {
+                selector: "edge",
+                style: {
+                    "width": 2,
+                    "line-color": "#64717a",
+                    "target-arrow-color": "#64717a",
+                    "target-arrow-shape": "triangle",
+                    "curve-style": "bezier",
+                    "label": "data(label)",
+                    "font-size": 9,
+                    "color": "#c0c6ca",
+                    "text-background-color": "#101316",
+                    "text-background-opacity": 0.9,
+                    "text-background-padding": 3,
+                    "text-rotation": "autorotate"
+                }
+            },
+            {
+                selector: "node:selected",
+                style: {
+                    "border-color": "#e6a15a",
+                    "border-width": 4
+                }
+            },
+            {
+                selector: "edge:selected",
+                style: {
+                    "line-color": "#e6a15a",
+                    "target-arrow-color": "#e6a15a",
+                    "width": 4
+                }
+            },
+            {
+                selector: ".faded",
+                style: {
+                    "opacity": 0.14
+                }
+            },
+            {
+                selector: ".highlighted",
+                style: {
+                    "opacity": 1,
+                    "border-width": 4
+                }
+            }
+        ],
+
+        layout: {
+            name: "cose",
+            animate: false,
+            padding: 45
+        },
+
+        minZoom: 0.15,
+        maxZoom: 3,
+        wheelSensitivity: 0.2
+    });
+
+    cy.on("tap", "node", event => {
+        showEntityDetail(event.target.id()).catch(showError);
+    });
+
+    cy.on("tap", "edge", event => {
+        showRelationshipDetail(event.target.id()).catch(showError);
+    });
+
+    cy.on("cxttap", "node", event => {
+        const nodeId = event.target.id();
+        if (confirm("Delete this entity and its relationships?")) {
+            deleteEntity(nodeId).catch(showError);
+        }
+    });
+
+    cy.on("cxttap", "edge", event => {
+        const edgeId = event.target.id();
+
+        if (confirm("Delete this relationship?")) {
+            deleteRelationship(edgeId).catch(showError);
+        }
+    });
+}
+
+async function loadGraph() {
+    if (!currentCase || !cy || graphLoading) return;
+
+    graphLoading = true;
+
+    try {
+        const [entities, relationships] = await Promise.all([
+            safeInvoke("get_entities", {}),
+            safeInvoke("get_relationships", {})
+        ]);
+
+        const entityIds = new Set(entities.map(e => e.id));
+
+        cy.elements().remove();
+
+        const nodes = entities.map(entity => ({
+            group: "nodes",
+            data: {
+                id: entity.id,
+                label: entity.label,
+                type: entity.entity_type,
+                color: COLORS[entity.entity_type] || COLORS.Other,
+                properties: entity.properties || {}
+            }
+        }));
+
+        const edges = relationships
+            .filter(rel =>
+                entityIds.has(rel.source_id) &&
+                entityIds.has(rel.target_id)
+            )
+            .map(rel => ({
+                group: "edges",
+                data: {
+                    id: rel.id,
+                    source: rel.source_id,
+                    target: rel.target_id,
+                    label: rel.rel_type,
+                    rel_type: rel.rel_type,
+                    properties: rel.properties || {}
+                }
+            }));
+
+        cy.add([...nodes, ...edges]);
+
+        cy.layout({
+            name: "cose",
+            animate: true,
+            animationDuration: 350,
+            nodeRepulsion: 6500,
+            idealEdgeLength: 130,
+            padding: 45
+        }).run();
+
+        setStatus(
+            `${entities.length} entities · ${edges.length} relationships`
+        );
+    } finally {
+        graphLoading = false;
+    }
+}
+
+function changeGraphLayout(name) {
+    if (!cy) return;
+
+    const supported = [
+        "cose",
+        "circle",
+        "concentric",
+        "breadthfirst",
+        "grid"
+    ];
+
+    if (!supported.includes(name)) {
+        throw new Error("Unsupported graph layout.");
+    }
+
+    cy.layout({
+        name,
+        animate: true,
+        padding: 40
+    }).run();
+}
+
+/* =========================================================
+   CASE MANAGEMENT
+========================================================= */
+
+function updateCaseLabel() {
+    const label = $("case-name");
+
+    if (label) {
+        label.textContent = currentCase
+            ? `CASE: ${currentCase.name}`
+            : "NO ACTIVE CASE";
+    }
+}
+
+function showNewCaseModal() {
+    showModal(
+        "Create Investigation",
+        `
+        <div class="detail-row">
+            <label>Investigation name</label>
+            <input id="case-name-input"
+                   type="text"
+                   placeholder="Investigation name"
+                   maxlength="120">
+        </div>
+        `,
+        async () => {
+            const name = $("case-name-input")?.value.trim();
+
+            if (!name) {
+                throw new Error("Investigation name is required.");
+            }
+
+            currentCase = await safeInvoke("create_case", { name });
+
+            updateCaseLabel();
+            closeModal();
+            await loadGraph();
+        }
+    );
+
+    setTimeout(() => $("case-name-input")?.focus(), 50);
+}
+
+async function showOpenCaseModal() {
+    const cases = await safeInvoke("list_cases");
+
+    const html = cases.length
+        ? cases.map(c => `
+            <button type="button"
+                    class="entity-list-item case-select"
+                    data-case-id="${escapeHtml(c.id)}">
+                <span class="type-badge">
+                    ${escapeHtml(c.status)}
+                </span>
+                ${escapeHtml(c.name)}
+            </button>
+        `).join("")
+        : `<p class="muted">No saved investigations found.</p>`;
+
+    showModal("Open Investigation", html, async () => {});
+
+    $("modal-confirm")?.classList.add("hidden");
+
+    document.querySelectorAll(".case-select").forEach(button => {
+        button.addEventListener("click", async () => {
+            currentCase = await safeInvoke("open_case", {
+                caseId: button.dataset.caseId
+            });
+
+            aiHistory = [];
+            updateCaseLabel();
+            closeModal();
+            await loadGraph();
+        });
+    });
+}
+
+async function deleteCurrentCase() {
+    requireCase();
+
+    if (!confirm(
+        `Permanently delete "${currentCase.name}" and all its case data?`
+    )) return;
+
+    await safeInvoke("delete_case", {
+        caseId: currentCase.id
+    });
+
+    currentCase = null;
+    activeEntity = null;
+    aiHistory = [];
+
+    if (cy) cy.elements().remove();
+
+    closeDetail();
+    updateCaseLabel();
+    setStatus("Investigation deleted.");
+}
+
+async function exportCase() {
+    requireCase();
+
+    const path = await safeInvoke("export_case", {
+        caseId: currentCase.id
+    });
+
+    alert("Investigation exported:\n" + path);
+}
+
+async function importCase() {
+    const dialog = TAURI?.dialog;
+
+    if (!dialog?.open) {
+        throw new Error("File picker is unavailable.");
+    }
+
+    const path = await dialog.open({
+        multiple: false,
+        filters: [{
+            name: "EKUKE Investigation",
+            extensions: ["ekuke"]
+        }]
+    });
+
+    if (!path) return;
+
+    currentCase = await safeInvoke("import_case", { path });
+
+    updateCaseLabel();
+    await loadGraph();
+
+    alert("Investigation imported successfully.");
+}
+
+/* =========================================================
+   ENTITY MANAGEMENT
+========================================================= */
+
+const ENTITY_TYPES = [
+    "Domain",
+    "Email",
+    "IPv4",
+    "Phone",
+    "Handle",
+    "Person",
+    "Organization",
+    "URL",
+    "Document",
+    "Other"
+];
+
+function showAddEntityModal() {
+    requireCase();
+
+    showModal(
+        "Add Entity",
+        `
+        <div class="detail-row">
+            <label>Entity type</label>
+            <select id="new-entity-type">
+                ${ENTITY_TYPES.map(type =>
+                    `<option value="${type}">${type}</option>`
+                ).join("")}
+            </select>
+        </div>
+
+        <div class="detail-row">
+            <label>Entity value</label>
+            <input id="new-entity-label"
+                   type="text"
+                   placeholder="example.com">
+        </div>
+        `,
+        async () => {
+            const entityType = $("new-entity-type").value;
+            const label = $("new-entity-label").value.trim();
+
+            if (!label) {
+                throw new Error("Entity value is required.");
+            }
+
+            await safeInvoke("create_entity", {
+                entityType,
+                label,
+                properties: null
+            });
+
+            closeModal();
+            await loadGraph();
+        }
+    );
+}
+
+async function deleteEntity(id) {
+    await safeInvoke("delete_entity", { id });
+
+    closeDetail();
+    await loadGraph();
+
+    setStatus("Entity and connected relationships deleted.");
 }
 
 async function showEntityDetail(id) {
-activeEntityId = id;
+    requireCase();
 
-const entity = await invoke('get_entity_by_id', { id });
+    const entity = await safeInvoke("get_entity_by_id", { id });
 
-document.getElementById('detail-panel')
-    .classList.remove('hidden');
+    activeEntity = entity;
 
-let propsHtml = '';
+    $("detail-panel")?.classList.remove("hidden");
 
-for (const [k, v] of Object.entries(entity.properties || {})) {
-    propsHtml += `
+    const properties = Object.entries(entity.properties || {})
+        .map(([key, value]) => `
+            <div class="detail-row">
+                <label>${escapeHtml(key)}</label>
+                <input type="text"
+                       data-prop="${escapeHtml(key)}"
+                       value="${escapeHtml(
+                           typeof value === "string"
+                               ? value
+                               : JSON.stringify(value)
+                       )}">
+            </div>
+        `).join("");
+
+    $("detail-content").innerHTML = `
         <div class="detail-row">
-            <label>${escapeHtml(k)}</label>
-            <input type="text"
-                value="${escapeHtml(
-                    typeof v === 'string' ? v : JSON.stringify(v)
-                )}"
-                data-prop="${escapeHtml(k)}">
-        </div>`;
-}
+            <label>Entity ID</label>
+            <input value="${escapeHtml(entity.id)}" readonly>
+        </div>
 
-document.getElementById('detail-content').innerHTML = `
-    <div class="detail-row">
-        <label>ID</label>
-        <input type="text" value="${escapeHtml(entity.id)}" readonly>
-    </div>
+        <div class="detail-row">
+            <label>Type</label>
+            <input value="${escapeHtml(entity.entity_type)}" readonly>
+        </div>
 
-    <div class="detail-row">
-        <label>Type</label>
-        <input type="text"
-            value="${escapeHtml(entity.entity_type)}" readonly>
-    </div>
+        <div class="detail-row">
+            <label>Label</label>
+            <input id="detail-label"
+                   value="${escapeHtml(entity.label)}">
+        </div>
 
-    <div class="detail-row">
-        <label>Label</label>
-        <input type="text" id="detail-label"
-            value="${escapeHtml(entity.label)}">
-    </div>
+        ${properties}
 
-    ${propsHtml}
+        <hr>
 
-    <hr>
+        <h4>CREATE RELATIONSHIP</h4>
 
-    <h4>Graph Relationship</h4>
+        <div class="detail-row">
+            <label>Find target entity</label>
+            <input id="link-target"
+                   type="search"
+                   placeholder="Search existing entities">
+        </div>
 
-    <div class="detail-row">
-        <label>Find target entity</label>
-        <input type="search" id="link-target"
-            placeholder="Search by entity name or type">
-    </div>
+        <div class="detail-row">
+            <label>Relationship type</label>
+            <input id="link-type"
+                   placeholder="owns, resolves_to, mentions...">
+        </div>
 
-    <div class="detail-row">
-        <label>Relationship type</label>
-        <input type="text" id="link-type"
-            placeholder="e.g. resolves_to, owns, mentions">
-    </div>
+        <div class="detail-row">
+            <label>Direction</label>
+            <p class="muted">
+                ${escapeHtml(entity.label)} → selected target
+            </p>
+        </div>
 
-    <div id="link-results">
-        <p class="muted">
-            Search for an entity, then select the exact result.
-        </p>
-    </div>
+        <div id="link-results">
+            <p class="muted">
+                Search and select the exact target entity.
+            </p>
+        </div>
 
-    <div style="margin-top:16px;">
+        <hr>
+
         <button class="btn primary" id="btn-update-entity">
-            Update
+            Save Entity
         </button>
 
         <button class="btn" id="btn-enrich-entity">
-            ⚡ Enrich
+            Enrich Entity
         </button>
 
         <button class="btn" id="btn-run-transform">
             Run Plugin
         </button>
 
-        <button class="btn danger" id="btn-delete-entity">
-            Delete
+        <button class="btn" id="btn-neighborhood">
+            View Neighbourhood
         </button>
-    </div>
-`;
 
-const targetInput = document.getElementById('link-target');
+        <button class="btn danger" id="btn-delete-entity">
+            Delete Entity
+        </button>
+    `;
 
-targetInput.addEventListener('input', () => {
-    clearTimeout(linkSearchTimer);
+    $("link-target").addEventListener("input", () => {
+        clearTimeout(linkSearchTimer);
 
-    linkSearchTimer = setTimeout(() => {
-        searchLinkTargets(entity, targetInput.value);
-    }, 250);
-});
+        linkSearchTimer = setTimeout(() => {
+            searchLinkTargets(entity, $("link-target").value)
+                .catch(showError);
+        }, 250);
+    });
 
-document.getElementById('btn-update-entity')
-    .addEventListener('click', async () => {
-        try {
-            const label =
-                document.getElementById('detail-label').value.trim();
+    $("btn-update-entity").addEventListener("click", () => {
+        updateEntity(entity).catch(showError);
+    });
 
-            if (!label) return alert('Entity label cannot be empty.');
-
-            const properties = {};
-
-            document.querySelectorAll(
-                '#detail-content input[data-prop]'
-            ).forEach(i => {
-                properties[i.dataset.prop] = i.value;
-            });
-
-            await invoke('update_entity', {
-                id: entity.id,
-                label,
-                properties
-            });
-
-            await loadGraph();
-            await showEntityDetail(entity.id);
-
-            setStatus('Entity updated.');
-        } catch (error) {
-            alert('Update failed: ' + error);
+    $("btn-delete-entity").addEventListener("click", () => {
+        if (confirm("Delete this entity and its relationships?")) {
+            deleteEntity(entity.id).catch(showError);
         }
     });
 
-document.getElementById('btn-delete-entity')
-    .addEventListener('click', async () => {
-        if (!confirm('Delete this entity and its relationships?')) return;
-
-        try {
-            await invoke('delete_entity', { id: entity.id });
-
-            closeDetail();
-            await loadGraph();
-
-            setStatus('Entity deleted.');
-        } catch (error) {
-            alert('Delete failed: ' + error);
-        }
+    $("btn-enrich-entity").addEventListener("click", () => {
+        enrichEntity(entity.id).catch(showError);
     });
 
-document.getElementById('btn-run-transform')
-    .addEventListener('click', () => showTransformModal(entity));
-
-document.getElementById('btn-enrich-entity')
-    .addEventListener('click', async () => {
-        const btn = document.getElementById('btn-enrich-entity');
-
-        btn.disabled = true;
-        btn.textContent = '⏳ Enriching…';
-
-        try {
-            const res = await invoke('enrich_entity', {
-                id: entity.id
-            });
-
-            await loadGraph();
-            await showEntityDetail(entity.id);
-
-            alert(
-                `⚡ Enrichment complete\n` +
-                `Properties added: ${res.properties_added}\n` +
-                `Entities created: ${res.entities_created}\n` +
-                `Relationships: ${res.relationships_created}\n\n` +
-                `${(res.notes || []).join('\n')}`
-            );
-        } catch (e) {
-            alert('Enrichment failed: ' + e);
-        } finally {
-            const currentButton =
-                document.getElementById('btn-enrich-entity');
-
-            if (currentButton) {
-                currentButton.disabled = false;
-                currentButton.textContent = '⚡ Enrich';
-            }
-        }
+    $("btn-run-transform").addEventListener("click", () => {
+        showTransformModal(entity).catch(showError);
     });
 
+    $("btn-neighborhood").addEventListener("click", () => {
+        showNeighborhood(entity.id).catch(showError);
+    });
 }
 
-/* PLUGINS */
+async function updateEntity(entity) {
+    const label = $("detail-label").value.trim();
 
-async function showTransformModal(entity) {
-const plugins = await invoke('get_plugins');
+    if (!label) {
+        throw new Error("Entity label cannot be empty.");
+    }
 
-const compatible = plugins.filter(p =>
-    (p.input_types || []).includes(entity.entity_type) ||
-    (p.input_types || []).includes('*')
-);
+    const properties = {};
 
-if (compatible.length === 0) {
-    return alert(
-        'No compatible plugins installed. Use ⚡ Enrich for built-in enrichment.'
-    );
-}
+    document.querySelectorAll("#detail-content [data-prop]")
+        .forEach(input => {
+            properties[input.dataset.prop] = input.value;
+        });
 
-let html = `
-    <div class="detail-row">
-        <label>Select Plugin</label>
-        <select id="transform-plugin">
-`;
-
-compatible.forEach(p => {
-    html += `
-        <option value="${escapeHtml(p.id)}">
-            ${escapeHtml(p.name)} — ${escapeHtml(p.description)}
-        </option>`;
-});
-
-html += '</select></div><div id="plugin-config"></div>';
-
-showModal('Run Plugin', html, async () => {
-    const pluginId =
-        document.getElementById('transform-plugin').value;
-
-    const config = {};
-
-    document.querySelectorAll('#plugin-config input').forEach(i => {
-        if (i.dataset.name) config[i.dataset.name] = i.value;
-    });
-
-    const result = await invoke('run_transform', {
-        pluginId,
-        entityId: entity.id,
-        config
+    await safeInvoke("update_entity", {
+        id: entity.id,
+        label,
+        properties
     });
 
     await loadGraph();
-    closeModal();
+    await showEntityDetail(entity.id);
 
-    alert(
-        `Done: ${result.entities} entities, ` +
-        `${result.relationships} relationships added`
-    );
-});
+    setStatus("Entity updated.");
+}
 
-const updateConfig = () => {
-    const plugin = compatible.find(p =>
-        p.id === document.getElementById('transform-plugin').value
-    );
+async function enrichEntity(id) {
+    const button = $("btn-enrich-entity");
 
-    const container = document.getElementById('plugin-config');
+    setBusy(button, true, "Enriching...");
 
-    container.innerHTML = '';
+    try {
+        const result = await safeInvoke("enrich_entity", { id });
 
-    (plugin?.config_fields || []).forEach(f => {
-        container.innerHTML += `
-            <div class="detail-row">
-                <label>
-                    ${escapeHtml(f.name)}${f.required ? ' *' : ''}
-                </label>
-                <input type="text"
-                    data-name="${escapeHtml(f.name)}"
-                    value="${escapeHtml(f.default || '')}"
-                    placeholder="${escapeHtml(f.description || '')}">
-            </div>`;
+        await loadGraph();
+        await showEntityDetail(id);
+
+        alert(
+            "Enrichment completed\n\n" +
+            `Properties: ${result.properties_added}\n` +
+            `Entities: ${result.entities_created}\n` +
+            `Relationships: ${result.relationships_created}\n\n` +
+            (result.notes || []).join("\n")
+        );
+    } finally {
+        setBusy($("btn-enrich-entity"), false);
+    }
+}
+
+/* =========================================================
+   GRAPH LINKING — EXACT TARGET SELECTION
+========================================================= */
+
+async function searchLinkTargets(source, query) {
+    const box = $("link-results");
+    if (!box) return;
+
+    const q = query.trim();
+
+    if (q.length < 2) {
+        box.innerHTML =
+            `<p class="muted">Enter at least two characters.</p>`;
+        return;
+    }
+
+    box.innerHTML = `<p class="muted">Searching case entities...</p>`;
+
+    const results = await safeInvoke("search_entities", {
+        query: q,
+        limit: 100
     });
-};
 
-document.getElementById('transform-plugin')
-    .addEventListener('change', updateConfig);
+    const filtered = results.filter(entity =>
+        entity.id !== source.id
+    );
 
-updateConfig();
+    if (!filtered.length) {
+        box.innerHTML =
+            `<p class="muted">No matching target entities found.</p>`;
+        return;
+    }
 
+    box.innerHTML = "";
+
+    filtered.forEach(entity => {
+        const button = document.createElement("button");
+
+        button.type = "button";
+        button.className = "btn link-result";
+        button.style.width = "100%";
+        button.style.textAlign = "left";
+        button.style.marginBottom = "6px";
+
+        button.textContent =
+            `${entity.entity_type} · ${entity.label} · ${entity.id.slice(0, 8)}`;
+
+        button.addEventListener("click", async () => {
+            const relType = $("link-type").value.trim();
+
+            if (!relType) {
+                alert("Enter a relationship type first.");
+                $("link-type").focus();
+                return;
+            }
+
+            if (entity.id === source.id) {
+                alert("Self-links are not allowed.");
+                return;
+            }
+
+            const alreadyExists = cy?.edges().some(edge =>
+                edge.data("source") === source.id &&
+                edge.data("target") === entity.id &&
+                edge.data("rel_type") === relType
+            );
+
+            if (alreadyExists) {
+                alert("This relationship already exists in the graph.");
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = "Creating relationship...";
+
+            try {
+                await safeInvoke("create_relationship", {
+                    sourceId: source.id,
+                    targetId: entity.id,
+                    relType,
+                    properties: null
+                });
+
+                await loadGraph();
+                await showEntityDetail(source.id);
+
+                setStatus(
+                    `Relationship created: ${source.label} → ${entity.label}`
+                );
+            } catch (error) {
+                button.disabled = false;
+                button.textContent =
+                    `${entity.entity_type} · ${entity.label} · ${entity.id.slice(0, 8)}`;
+
+                throw error;
+            }
+        });
+
+        box.appendChild(button);
+    });
 }
 
-/* SEARCH */
+async function showRelationshipDetail(id) {
+    const edge = cy?.getElementById(id);
 
-async function handleSearch(e) {
-const query = e.target.value.trim();
+    if (!edge || edge.empty()) return;
 
-if (!query || !currentCase || !cy) {
-    if (cy) cy.nodes().style('opacity', 1);
-    return;
-}
+    const sourceId = edge.data("source");
+    const targetId = edge.data("target");
 
-const results = await invoke('search_entities', {
-    query,
-    limit: 20
-});
+    const [source, target] = await Promise.all([
+        safeInvoke("get_entity_by_id", { id: sourceId }),
+        safeInvoke("get_entity_by_id", { id: targetId })
+    ]);
 
-const ids = new Set(results.map(r => r.id));
+    $("detail-panel")?.classList.remove("hidden");
 
-cy.nodes().forEach(n => {
-    n.style('opacity', ids.has(n.id()) ? 1 : 0.15);
-});
+    $("detail-content").innerHTML = `
+        <h4>RELATIONSHIP</h4>
 
-}
+        <div class="detail-row">
+            <label>Source</label>
+            <input value="${escapeHtml(source.label)}" readonly>
+        </div>
 
-/* PLUGIN LIST */
+        <div class="detail-row">
+            <label>Relationship type</label>
+            <input value="${escapeHtml(edge.data("rel_type"))}" readonly>
+        </div>
 
-async function loadPlugins() {
-const plugins = await invoke('get_plugins');
+        <div class="detail-row">
+            <label>Target</label>
+            <input value="${escapeHtml(target.label)}" readonly>
+        </div>
 
-const container = document.getElementById('plugin-list');
+        <p class="muted">
+            Direction: source → target
+        </p>
 
-container.innerHTML = plugins.length
-    ? ''
-    : '<p class="muted">No external plugins. Built-in ⚡ Enrich works out of the box.</p>';
+        <button class="btn" id="btn-open-source">
+            Open Source Entity
+        </button>
 
-plugins.forEach(p => {
-    const div = document.createElement('div');
+        <button class="btn" id="btn-open-target">
+            Open Target Entity
+        </button>
 
-    div.className = 'plugin-item';
-
-    div.innerHTML = `
-        <div class="name">${escapeHtml(p.name)}</div>
-        <div class="desc">${escapeHtml(p.description || '')}</div>
+        <button class="btn danger" id="btn-delete-relationship">
+            Delete Relationship
+        </button>
     `;
 
-    container.appendChild(div);
-});
+    $("btn-open-source").onclick = () =>
+        showEntityDetail(sourceId).catch(showError);
 
+    $("btn-open-target").onclick = () =>
+        showEntityDetail(targetId).catch(showError);
+
+    $("btn-delete-relationship").onclick = async () => {
+        if (!confirm("Delete this relationship?")) return;
+
+        await deleteRelationship(id);
+    };
 }
 
-/* SETTINGS */
+async function deleteRelationship(id) {
+    await safeInvoke("delete_relationship", { id });
 
-let settingsConfig = null;
+    closeDetail();
+    await loadGraph();
+
+    setStatus("Relationship deleted.");
+}
+
+async function showNeighborhood(id) {
+    const result = await safeInvoke("entity_neighborhood", { id });
+
+    const neighbors = result.neighbors || [];
+
+    const html = neighbors.length
+        ? neighbors.map(item => `
+            <button class="entity-list-item"
+                    data-neighbor="${escapeHtml(item.other_id)}">
+                <span class="type-badge">
+                    ${escapeHtml(item.other_type)}
+                </span>
+                ${escapeHtml(item.other_label)}
+                <small>
+                    ${escapeHtml(item.direction)} ·
+                    ${escapeHtml(item.rel_type)}
+                </small>
+            </button>
+        `).join("")
+        : `<p class="muted">No connected entities.</p>`;
+
+    showModal("Entity Neighbourhood", html, async () => {});
+
+    $("modal-confirm")?.classList.add("hidden");
+
+    document.querySelectorAll("[data-neighbor]").forEach(button => {
+        button.addEventListener("click", async () => {
+            closeModal();
+            await showEntityDetail(button.dataset.neighbor);
+        });
+    });
+}
+
+/* =========================================================
+   TEXT EXTRACTION AND SCRAPING
+========================================================= */
+
+function showExtractModal() {
+    requireCase();
+
+    showModal(
+        "Extract Entities",
+        `
+        <div class="detail-row">
+            <label>Paste text to analyze</label>
+            <textarea id="extract-text" rows="9"
+                placeholder="Paste public-source text here..."></textarea>
+        </div>
+        `,
+        async () => {
+            const text = $("extract-text").value.trim();
+
+            if (!text) throw new Error("Text is required.");
+
+            const count = await safeInvoke(
+                "extract_entities_from_text",
+                { text }
+            );
+
+            closeModal();
+            await loadGraph();
+
+            alert(`${count} new entities extracted.`);
+        }
+    );
+}
+
+function showScrapeModal() {
+    requireCase();
+
+    showModal(
+        "Fetch Public Webpage",
+        `
+        <div class="detail-row">
+            <label>URL</label>
+            <input id="scrape-url"
+                   type="url"
+                   placeholder="https://example.com">
+        </div>
+        <p class="muted">
+            Fetches a public webpage and imports extracted entities
+            into the active investigation.
+        </p>
+        `,
+        async () => {
+            const url = $("scrape-url").value.trim();
+
+            if (!/^https?:\/\//i.test(url)) {
+                throw new Error("Enter a valid HTTP or HTTPS URL.");
+            }
+
+            const result = await safeInvoke("scrape_and_import", { url });
+
+            closeModal();
+            await loadGraph();
+
+            alert(
+                `Fetch completed\n\n` +
+                `URL: ${result.final_url}\n` +
+                `HTTP: ${result.status}\n` +
+                `Entities: ${result.entities_added}\n` +
+                `Relationships: ${result.relationships_added}`
+            );
+        }
+    );
+}
+
+/* =========================================================
+   GRAPH SEARCH AND EXPORT
+========================================================= */
+
+async function handleSearch(query) {
+    if (!cy) return;
+
+    const q = query.trim();
+
+    if (!q || !currentCase) {
+        cy.elements().removeClass("faded highlighted");
+        return;
+    }
+
+    const results = await safeInvoke("search_entities", {
+        query: q,
+        limit: 100
+    });
+
+    const ids = new Set(results.map(item => item.id));
+
+    cy.elements().addClass("faded");
+    cy.nodes().filter(node => ids.has(node.id()))
+        .removeClass("faded")
+        .addClass("highlighted");
+
+    cy.edges().forEach(edge => {
+        if (
+            ids.has(edge.data("source")) &&
+            ids.has(edge.data("target"))
+        ) {
+            edge.removeClass("faded");
+        }
+    });
+}
+
+function exportPng() {
+    if (!cy || !cy.nodes().length) {
+        alert("The graph is empty.");
+        return;
+    }
+
+    const anchor = document.createElement("a");
+
+    anchor.href = cy.png({
+        full: true,
+        scale: 2,
+        bg: "#101316"
+    });
+
+    anchor.download =
+        `EKUKE-${Date.now()}.png`;
+
+    anchor.click();
+}
+
+/* =========================================================
+   PLUGINS
+========================================================= */
+
+async function loadPlugins() {
+    const plugins = await safeInvoke("get_plugins");
+    const container = $("plugin-list");
+
+    if (!container) return;
+
+    container.innerHTML = "";
+
+    if (!plugins.length) {
+        container.innerHTML =
+            `<p class="muted">No plugins installed.</p>`;
+        return;
+    }
+
+    plugins.forEach(plugin => {
+        const button = document.createElement("button");
+
+        button.className = "plugin-item";
+        button.type = "button";
+
+        button.innerHTML = `
+            <div class="name">${escapeHtml(plugin.name)}</div>
+            <div class="desc">${escapeHtml(plugin.description || "")}</div>
+        `;
+
+        button.addEventListener("click", async () => {
+            if (!activeEntity) {
+                alert("Select an entity first.");
+                return;
+            }
+
+            await showTransformModal(activeEntity);
+        });
+
+        container.appendChild(button);
+    });
+}
+
+async function showTransformModal(entity) {
+    const plugins = await safeInvoke("get_plugins");
+
+    const compatible = plugins.filter(plugin =>
+        (plugin.input_types || []).includes("*") ||
+        (plugin.input_types || []).includes(entity.entity_type)
+    );
+
+    if (!compatible.length) {
+        alert("No compatible plugins found.");
+        return;
+    }
+
+    const html = `
+        <div class="detail-row">
+            <label>Plugin</label>
+            <select id="transform-plugin">
+                ${compatible.map(plugin => `
+                    <option value="${escapeHtml(plugin.id)}">
+                        ${escapeHtml(plugin.name)}
+                    </option>
+                `).join("")}
+            </select>
+        </div>
+
+        <div id="plugin-config"></div>
+    `;
+
+    showModal("Run Intelligence Plugin", html, async () => {
+        const pluginId = $("transform-plugin").value;
+        const config = {};
+
+        document.querySelectorAll("#plugin-config input").forEach(input => {
+            if (input.dataset.name) {
+                config[input.dataset.name] = input.value;
+            }
+        });
+
+        const result = await safeInvoke("run_transform", {
+            pluginId,
+            entityId: entity.id,
+            config
+        });
+
+        closeModal();
+        await loadGraph();
+
+        alert(
+            `${result.entities} entities and ` +
+            `${result.relationships} relationships processed.`
+        );
+    });
+
+    const updateConfig = () => {
+        const selected = compatible.find(p =>
+            p.id === $("transform-plugin").value
+        );
+
+        $("plugin-config").innerHTML =
+            (selected?.config_fields || []).map(field => `
+                <div class="detail-row">
+                    <label>${escapeHtml(field.name)}</label>
+                    <input data-name="${escapeHtml(field.name)}"
+                           value="${escapeHtml(field.default || "")}">
+                </div>
+            `).join("");
+    };
+
+    $("transform-plugin").addEventListener("change", updateConfig);
+    updateConfig();
+}
+
+/* =========================================================
+   SETTINGS
+========================================================= */
 
 async function loadConfig() {
-settingsConfig = await invoke('get_config');
+    settingsConfig = await safeInvoke("get_config");
+    return settingsConfig;
 }
 
 async function showSettings() {
-await loadConfig();
+    const config = await loadConfig();
 
-const c = settingsConfig;
+    $("set-ai-enabled").value = String(!!config.ai_enabled);
+    $("set-ai-url").value = config.ai_base_url || "";
+    $("set-ai-key").value = config.ai_api_key || "";
+    $("set-ai-model").value = config.ai_model || "";
+    $("set-author").value = config.default_author || "";
+    $("set-plugins-dir").value = config.plugins_dir || "";
+    $("set-cases-dir").value = config.cases_dir || "";
 
-document.getElementById('set-ai-enabled').value =
-    c.ai_enabled ? 'true' : 'false';
+    $("set-key-shodan").value =
+        config.api_keys?.shodan || "";
 
-document.getElementById('set-ai-url').value = c.ai_base_url || '';
-document.getElementById('set-ai-key').value = c.ai_api_key || '';
-document.getElementById('set-ai-model').value = c.ai_model || '';
-document.getElementById('set-author').value = c.default_author || '';
-document.getElementById('set-plugins-dir').value = c.plugins_dir || '';
-document.getElementById('set-cases-dir').value = c.cases_dir || '';
-
-document.getElementById('set-key-shodan').value =
-    (c.api_keys && c.api_keys.shodan) || '';
-
-document.getElementById('settings-overlay')
-    .classList.remove('hidden');
-
+    $("settings-overlay").classList.remove("hidden");
 }
 
-const closeSettings = () =>
-document.getElementById('settings-overlay').classList.add('hidden');
+function closeSettings() {
+    $("settings-overlay")?.classList.add("hidden");
+}
 
 async function saveSettings() {
-const c = settingsConfig;
+    const config = settingsConfig || {};
 
-c.ai_enabled =
-    document.getElementById('set-ai-enabled').value === 'true';
+    config.ai_enabled = $("set-ai-enabled").value === "true";
+    config.ai_base_url = $("set-ai-url").value.trim();
+    config.ai_api_key = $("set-ai-key").value.trim();
+    config.ai_model = $("set-ai-model").value.trim();
+    config.default_author = $("set-author").value.trim();
+    config.plugins_dir = $("set-plugins-dir").value.trim();
+    config.cases_dir = $("set-cases-dir").value.trim();
 
-c.ai_base_url =
-    document.getElementById('set-ai-url').value.trim() ||
-    'https://api.openai.com/v1';
+    config.api_keys = config.api_keys || {};
 
-c.ai_api_key =
-    document.getElementById('set-ai-key').value.trim();
+    const shodan = $("set-key-shodan").value.trim();
 
-c.ai_model =
-    document.getElementById('set-ai-model').value.trim() ||
-    'gpt-4o-mini';
+    if (shodan) config.api_keys.shodan = shodan;
 
-c.default_author =
-    document.getElementById('set-author').value.trim() ||
-    'Anonymous-beta';
+    await safeInvoke("set_config", { config });
 
-c.plugins_dir =
-    document.getElementById('set-plugins-dir').value.trim() ||
-    c.plugins_dir;
+    settingsConfig = config;
 
-c.cases_dir =
-    document.getElementById('set-cases-dir').value.trim() ||
-    c.cases_dir;
+    closeSettings();
+    await loadPlugins();
 
-const shodan =
-    document.getElementById('set-key-shodan').value.trim();
-
-c.api_keys = c.api_keys || {};
-
-if (shodan) c.api_keys.shodan = shodan;
-
-await invoke('set_config', { config: c });
-
-closeSettings();
-
-await loadPlugins();
-
-appendAiMessage('system', 'Settings saved.');
-
+    setStatus("Settings saved.");
 }
 
 async function saveExtraKey() {
-const name =
-document.getElementById('set-key-name').value.trim();
+    const name = $("set-key-name").value.trim();
+    const value = $("set-key-value").value.trim();
 
-const value =
-    document.getElementById('set-key-value').value.trim();
+    if (!name || !value) {
+        throw new Error("Enter both the key name and value.");
+    }
 
-if (!name || !value) {
-    return alert('Key name and value required');
-}
+    settingsConfig.api_keys = settingsConfig.api_keys || {};
+    settingsConfig.api_keys[name] = value;
 
-settingsConfig.api_keys = settingsConfig.api_keys || {};
-settingsConfig.api_keys[name] = value;
+    await safeInvoke("set_config", {
+        config: settingsConfig
+    });
 
-await invoke('set_config', {
-    config: settingsConfig
-});
+    $("set-key-name").value = "";
+    $("set-key-value").value = "";
 
-document.getElementById('set-key-name').value = '';
-document.getElementById('set-key-value').value = '';
-
-alert(`Key "${name}" saved`);
-
+    alert("API key saved.");
 }
 
 async function testAiConnection() {
-settingsConfig.ai_enabled = true;
+    const config = settingsConfig || await loadConfig();
 
-settingsConfig.ai_base_url =
-    document.getElementById('set-ai-url').value.trim() ||
-    'https://api.openai.com/v1';
+    config.ai_enabled = true;
+    config.ai_base_url = $("set-ai-url").value.trim();
+    config.ai_api_key = $("set-ai-key").value.trim();
+    config.ai_model = $("set-ai-model").value.trim();
 
-settingsConfig.ai_api_key =
-    document.getElementById('set-ai-key').value.trim();
+    await safeInvoke("set_config", { config });
 
-settingsConfig.ai_model =
-    document.getElementById('set-ai-model').value.trim() ||
-    'gpt-4o-mini';
+    const output = $("ai-test-result");
+    output.textContent = "Testing...";
 
-await invoke('set_config', {
-    config: settingsConfig
-});
-
-const el = document.getElementById('ai-test-result');
-
-el.textContent = 'Testing...';
-
-try {
-    el.textContent = '✔ ' + await invoke('ai_test_connection');
-} catch (e) {
-    el.textContent = '✘ ' + e;
+    try {
+        const result = await safeInvoke("ai_test_connection");
+        output.textContent = "Connection successful: " + result;
+    } catch (error) {
+        output.textContent = "Connection failed: " + error;
+    }
 }
 
+/* =========================================================
+   AI ASSISTANT
+========================================================= */
+
+function toggleAiPanel() {
+    $("ai-panel")?.classList.toggle("hidden");
 }
 
-/* AI CHAT */
+function appendAiMessage(role, message) {
+    const container = $("ai-messages");
+    if (!container) return;
 
-const toggleAiPanel = () =>
-document.getElementById('ai-panel').classList.toggle('hidden');
+    const item = document.createElement("div");
 
-function appendAiMessage(role, text) {
-const box = document.getElementById('ai-messages');
+    item.className = `ai-msg ai-${role}`;
+    item.textContent = message;
 
-const div = document.createElement('div');
-
-div.className = `ai-msg ai-${role}`;
-div.textContent = text;
-
-box.appendChild(div);
-box.scrollTop = box.scrollHeight;
-
+    container.appendChild(item);
+    container.scrollTop = container.scrollHeight;
 }
 
-const dropThinking = () => {
-const b = document.getElementById('ai-messages');
-if (b.lastChild) b.lastChild.remove();
-};
+function removeLastAiMessage() {
+    $("ai-messages")?.lastElementChild?.remove();
+}
 
 async function sendAiMessage() {
-const input = document.getElementById('ai-input');
-const text = input.value.trim();
+    const input = $("ai-input");
+    const message = input.value.trim();
 
-if (!text) return;
+    if (!message) return;
 
-if (!currentCase) {
-    appendAiMessage('system', '⚠ Open or create a case first.');
-    return;
-}
+    if (!currentCase) {
+        appendAiMessage("system", "Open an investigation first.");
+        return;
+    }
 
-input.value = '';
+    input.value = "";
 
-appendAiMessage('user', text);
-
-aiHistory.push({
-    role: 'user',
-    content: text
-});
-
-appendAiMessage('system', '…thinking');
-
-try {
-    const result = await invoke('ai_chat', {
-        messages: aiHistory
-    });
-
-    dropThinking();
-
-    appendAiMessage(
-        'assistant',
-        result.reply || '(empty reply)'
-    );
+    appendAiMessage("user", message);
 
     aiHistory.push({
-        role: 'assistant',
-        content: result.reply || ''
+        role: "user",
+        content: message
     });
 
-    if (result.actions && result.actions.length > 0) {
-        appendAiMessage(
-            'system',
-            `🔧 ${result.actions.length} action(s): ` +
-            result.actions.map(a => a.tool).join(', ')
-        );
+    appendAiMessage("system", "Processing...");
 
-        await loadGraph();
+    try {
+        const result = await safeInvoke("ai_chat", {
+            messages: aiHistory
+        });
+
+        removeLastAiMessage();
+
+        const reply = result.reply || "No response.";
+
+        appendAiMessage("assistant", reply);
+
+        aiHistory.push({
+            role: "assistant",
+            content: reply
+        });
+
+        if (result.actions?.length) {
+            await loadGraph();
+        }
+    } catch (error) {
+        removeLastAiMessage();
+        appendAiMessage("system", "Error: " + error);
     }
-} catch (e) {
-    dropThinking();
-    appendAiMessage('system', 'Error: ' + e);
-}
-
 }
 
 async function summarizeCase() {
-if (!currentCase) {
-return appendAiMessage('system', '⚠ Open a case first.');
+    if (!currentCase) {
+        appendAiMessage("system", "Open a case first.");
+        return;
+    }
+
+    appendAiMessage("system", "Analyzing investigation...");
+
+    try {
+        const result = await safeInvoke("ai_summarize_case");
+        removeLastAiMessage();
+        appendAiMessage("assistant", result);
+    } catch (error) {
+        removeLastAiMessage();
+        appendAiMessage("system", "Error: " + error);
+    }
 }
 
-appendAiMessage('user', '📋 Summarize this case');
-appendAiMessage('system', '…analyzing case graph');
-
-try {
-    const reply = await invoke('ai_summarize_case');
-
-    dropThinking();
-    appendAiMessage('assistant', reply);
-} catch (e) {
-    dropThinking();
-    appendAiMessage('system', 'Error: ' + e);
-}
-
-}
-
-/* MODAL HELPERS */
+/* =========================================================
+   MODAL HELPERS
+========================================================= */
 
 function showModal(title, bodyHtml, onConfirm) {
-document.getElementById('modal-title').textContent = title;
-document.getElementById('modal-body').innerHTML = bodyHtml;
+    $("modal-title").textContent = title;
+    $("modal-body").innerHTML = bodyHtml;
 
-document.getElementById('modal-overlay')
-    .classList.remove('hidden');
+    $("modal-overlay").classList.remove("hidden");
 
-const confirmBtn = document.getElementById('modal-confirm');
-const newConfirm = confirmBtn.cloneNode(true);
+    const oldButton = $("modal-confirm");
+    const newButton = oldButton.cloneNode(true);
 
-confirmBtn.parentNode.replaceChild(newConfirm, confirmBtn);
+    oldButton.replaceWith(newButton);
 
-newConfirm.addEventListener('click', async () => {
-    try {
-        await onConfirm();
-    } catch (e) {
-        alert('Error: ' + e);
-    }
+    newButton.classList.remove("hidden");
+
+    newButton.addEventListener("click", async () => {
+        setBusy(newButton, true, "Working...");
+
+        try {
+            await onConfirm();
+        } catch (error) {
+            showError(error);
+        } finally {
+            if (newButton.isConnected) {
+                setBusy(newButton, false);
+            }
+        }
+    });
+}
+
+function closeModal() {
+    $("modal-overlay")?.classList.add("hidden");
+}
+
+function closeDetail() {
+    activeEntity = null;
+    $("detail-panel")?.classList.add("hidden");
+}
+
+/* =========================================================
+   START APPLICATION
+========================================================= */
+
+init().catch(error => {
+    console.error("EKUKE initialization failed:", error);
+    setStatus("Initialization failed: " + error, true);
 });
-
-}
-
-const closeModal = () =>
-document.getElementById('modal-overlay').classList.add('hidden');
-
-const closeDetail = () => {
-activeEntityId = null;
-document.getElementById('detail-panel').classList.add('hidden');
-};
-
-const debounce = (fn, ms) => {
-let t;
-
-return (...a) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...a), ms);
-};
-
-};
-
-function escapeHtml(text) {
-const div = document.createElement('div');
-
-div.textContent = text == null ? '' : String(text);
-
-return div.innerHTML;
-
-}
-
-init().catch(e => setStatus('Init failed: ' + e, true));
